@@ -1,0 +1,133 @@
+// Modelo de datos propio (Postgres) — ver diseño.md sección 8.
+// Los campos espejados desde TeoWin mantienen el mismo nombre/casing que TeoWin
+// (idEscena, idCatalogo, familia, articulo, color, medida1/2/3, unidades,
+// codigoOrdenFabricacion, numeroOrdenCustom, descripcion, codigo_pedido,
+// referencia, nombreComercial, idUnico). Los campos propios usan snake_case.
+//
+// Los dos índices únicos parciales de la sección 8.3 (WHERE estado <> 'ELIMINADO'
+// / 'ELIMINADA') no son expresables en el lenguaje de schema de Prisma — se
+// agregan a mano en la migración SQL generada, ver prisma/migrations/.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum OrdenEstado {
+  PENDIENTE
+  EN_PROCESO
+  LISTA
+  ELIMINADO
+}
+
+enum PedidoEstado {
+  PENDIENTE
+  EN_PRODUCCION
+  FINALIZADO
+  ELIMINADO
+}
+
+enum ModuloEstado {
+  PENDIENTE
+  EN_PRODUCCION
+  FINALIZADO
+  ELIMINADO
+}
+
+enum DespieceTipoEstado {
+  PENDIENTE
+  EN_PRODUCCION
+  FINALIZADO
+  ELIMINADO
+}
+
+enum PiezaFisicaEstado {
+  PENDIENTE
+  CORTADA
+  ELIMINADA
+}
+
+model Orden {
+  id                    String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  codigoOrdenFabricacion Int
+  numeroOrdenCustom     String
+  descripcion           String
+  estado                OrdenEstado @default(PENDIENTE)
+  creado_en             DateTime    @default(now())
+  eliminado_en          DateTime?
+
+  pedidos Pedido[]
+
+  @@map("orden")
+}
+
+model Pedido {
+  id             String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orden_id       String       @db.Uuid
+  codigo_pedido  String
+  referencia     String
+  nombreComercial String
+  estado         PedidoEstado @default(PENDIENTE)
+  creado_en      DateTime     @default(now())
+  eliminado_en   DateTime?
+
+  orden   Orden    @relation(fields: [orden_id], references: [id])
+  modulos Modulo[]
+
+  @@map("pedido")
+}
+
+model Modulo {
+  id           String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  pedido_id    String       @db.Uuid
+  idEscena     Int
+  descripcion  String
+  estado       ModuloEstado @default(PENDIENTE)
+  creado_en    DateTime     @default(now())
+  eliminado_en DateTime?
+
+  pedido         Pedido         @relation(fields: [pedido_id], references: [id])
+  despieceTipos  DespieceTipo[]
+
+  @@map("modulo")
+}
+
+model DespieceTipo {
+  id           String             @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  modulo_id    String             @db.Uuid
+  familia      String
+  articulo     String
+  color        String
+  descripcion  String? // tArticuloDescripciones.descripcion para familia/articulo de la pieza (mismo join que Modulo.descripcion, §3.3) — nullable, el catálogo puede no tener descripción para algún par familia/articulo
+  medida1      Decimal
+  medida2      Decimal
+  medida3      Decimal? // diseño.md §3.4/§3.6 no traen medida3 para piezas (solo L/P) — nullable hasta que haya una fuente
+  idCatalogo   Int
+  unidades     Int
+  estado       DespieceTipoEstado @default(PENDIENTE)
+  creado_en    DateTime           @default(now())
+  eliminado_en DateTime?
+
+  modulo        Modulo        @relation(fields: [modulo_id], references: [id])
+  piezasFisicas PiezaFisica[]
+
+  @@map("despiece_tipo")
+}
+
+model PiezaFisica {
+  id               String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  despiece_tipo_id String            @db.Uuid
+  idUnico          Int?
+  estado           PiezaFisicaEstado @default(PENDIENTE)
+  escaneado_en     DateTime?
+  creado_en        DateTime          @default(now())
+  eliminado_en     DateTime?
+
+  despieceTipo DespieceTipo @relation(fields: [despiece_tipo_id], references: [id])
+
+  @@map("pieza_fisica")
+}
