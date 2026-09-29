@@ -35,6 +35,12 @@ export async function fetchOrdenCabecera(orden: number): Promise<TeowinOrdenCabe
 // pasaban a 3607, con 863 idUnico repetidos, lo que rompía el INSERT contra
 // el índice único de la sección 8.3 con un 409 engañoso ("ya existe") para
 // una orden que en realidad nunca se había llegado a insertar.
+// IDIOMA: en tArticuloDescripciones el español está cargado como 'ESP' (más
+// completo) y como 'ES' (parcial) — filtrar solo 'ES' dejaba sin descripción
+// a piezas como PZD/D ("DIVISOR DE PLACARD", solo existe como 'ESP'). Como
+// para un mismo familia/articulo/idCatalogo pueden existir ambas filas, el
+// join se hace con OUTER APPLY TOP 1 (prefiere 'ESP') para no duplicar filas
+// (mismo fan-out del bug descrito arriba). Igual en fetchModulosDePedido.
 // Filtro de "es una pieza de placar": d.idCatalogo = 4, NO familia IN
 // ('PZA','PZC','PZD','PZP') como decía diseño.md §3.2 originalmente.
 // Confirmado con el Maestro de Productos de TeoWin que las mismas familias
@@ -59,11 +65,15 @@ export async function fetchOrdenDespiece(orden: number): Promise<TeowinDespieceR
          ON d.presupuesto = ofab.codigoPresupuesto
      LEFT JOIN tdespieceLineaPresupuestoUnico u
          ON u.idDespiece = d.codigo
-     LEFT JOIN tArticuloDescripciones ad
-         ON ad.familia = d.familia
-        AND ad.articulo = d.articulo
-        AND ad.idioma = 'ES'
-        AND ad.idCatalogo = d.idCatalogo
+     OUTER APPLY (
+         SELECT TOP 1 x.descripcion
+         FROM tArticuloDescripciones x
+         WHERE x.familia = d.familia
+           AND x.articulo = d.articulo
+           AND x.idCatalogo = d.idCatalogo
+           AND x.idioma IN ('ESP', 'ES')
+         ORDER BY CASE WHEN x.idioma = 'ESP' THEN 0 ELSE 1 END
+     ) ad
      WHERE ofab.codigoOrdenFabricacion = @orden
        AND d.siEscandallo = 1
        AND d.idCatalogo = 4`,
@@ -101,11 +111,15 @@ export async function fetchModulosDePedido(codigoPedido: string): Promise<Teowin
         padre.medida2  AS H,
         padre.medida3  AS P
      FROM tdespieceLineaPresupuesto padre
-     LEFT JOIN tArticuloDescripciones ad
-         ON ad.familia = padre.familia
-        AND ad.articulo = padre.articulo
-        AND ad.idioma = 'ES'
-        AND ad.idCatalogo = padre.idCatalogo
+     OUTER APPLY (
+         SELECT TOP 1 x.descripcion
+         FROM tArticuloDescripciones x
+         WHERE x.familia = padre.familia
+           AND x.articulo = padre.articulo
+           AND x.idCatalogo = padre.idCatalogo
+           AND x.idioma IN ('ESP', 'ES')
+         ORDER BY CASE WHEN x.idioma = 'ESP' THEN 0 ELSE 1 END
+     ) ad
      WHERE padre.presupuesto = @codigoPedido
        AND padre.codigoPadre = -1`,
     { codigoPedido },
