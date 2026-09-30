@@ -7,4 +7,6 @@ export interface OrdenResponseDTO {
   creado_en: string;
   archivada_en: string | null;
   pedidosCount: number;
+  /** Códigos de pedido de la orden (para buscar por pedido en el listado). */
+  codigosPedido: string[];
 }

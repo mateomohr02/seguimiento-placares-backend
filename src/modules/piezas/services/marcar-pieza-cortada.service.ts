@@ -1,11 +1,12 @@
 import { prisma } from "../../../config/prisma";
 import { AppError } from "../../../utils/AppError";
+import { propagarDesdeModulo, recalcularDespieceTipo } from "../../estados/estados.service";
 
 // diseño.md §6/§8.2 — cascada automática: al marcar una PiezaFisica como
 // CORTADA (por escaneo en Vista 5, o por confirmación manual en Vista 4),
-// sube DespieceTipo → Modulo → Pedido → Orden de PENDIENTE a EN_PRODUCCION
-// (EN_PROCESO en Orden, que usa otro nombre de estado). Nunca escribe
-// FINALIZADO/LISTA acá — eso es exclusivamente manual (marcar-finalizado).
+// se recalcula DespieceTipo → Modulo → Pedido → Orden (estados.service.ts):
+// suben de PENDIENTE a EN_PRODUCCION (EN_PROCESO en Orden). Nunca escribe
+// FINALIZADO en Módulo/Pedido acá — eso es manual (marcar-finalizado).
 //
 // PiezaFisica.estado no tiene un valor FINALIZADO propio (§8.2: solo
 // PENDIENTE | CORTADA | ELIMINADA) — el botón "Marcar finalizado" a nivel
@@ -69,18 +70,9 @@ export async function marcarPiezaCortada(where: { id: string } | { idUnico: numb
     const { pedido } = modulo;
     const { orden } = pedido;
 
-    if (despieceTipo.estado === "PENDIENTE") {
-      await tx.despieceTipo.update({ where: { id: despieceTipo.id }, data: { estado: "EN_PRODUCCION" } });
-    }
-    if (modulo.estado === "PENDIENTE") {
-      await tx.modulo.update({ where: { id: modulo.id }, data: { estado: "EN_PRODUCCION" } });
-    }
-    if (pedido.estado === "PENDIENTE") {
-      await tx.pedido.update({ where: { id: pedido.id }, data: { estado: "EN_PRODUCCION" } });
-    }
-    if (orden.estado === "PENDIENTE") {
-      await tx.orden.update({ where: { id: orden.id }, data: { estado: "EN_PROCESO" } });
-    }
+    // Correspondencias de estado entre niveles: ver estados.service.ts
+    await recalcularDespieceTipo(tx, despieceTipo.id);
+    await propagarDesdeModulo(tx, modulo.id);
 
     return {
       yaEscaneada,

@@ -9,6 +9,9 @@ export async function listOrdenes({ archivadas }: { archivadas: boolean }) {
       archivada_en: archivadas ? { not: null } : null,
     },
     orderBy: { creado_en: "desc" },
-    include: { pedidos: { select: { id: true } } },
+    include: {
+      // codigo_pedido: el buscador del listado también encuentra órdenes por pedido.
+      pedidos: { where: { estado: { not: "ELIMINADO" } }, select: { id: true, codigo_pedido: true } },
+    },
   });
 }
