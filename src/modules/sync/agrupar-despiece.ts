@@ -3,7 +3,8 @@ import type { TeowinDespieceRow } from "./teowin-orden.types";
 // Una fila de despiece de TeoWin NO equivale siempre a una pieza física:
 // - Con etiqueta (filas en tdespieceLineaPresupuestoUnico): una pieza física
 //   por cada idUnico.
-// - Sin etiqueta, `unidades` puede ser fraccionario. Ej. los paneles PZPP/PAN
+// - Sin etiqueta, `unidades` puede ser fraccionario (los PZPP/PAN enteros sí
+//   tienen etiqueta; los fraccionarios, 0,5 / 0,25, no). Ej. los paneles PZPP/PAN
 //   del pedido 26-02149: dos filas de 0,5 (323 x 688) = un panel, y cuatro de
 //   0,25 (160 x 688) = otro panel. Contar una pieza por fila daba 6 en vez de 2
 //   (y antes de incluir PZPP, 0). Se agrupan por tipo (mismo módulo, familia,
