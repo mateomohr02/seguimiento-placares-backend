@@ -6,7 +6,7 @@ import {
   fetchOrdenDespiece,
   fetchPedidoInfo,
 } from "../../sync/teowin-orden.queries";
-import type { TeowinDespieceRow } from "../../sync/teowin-orden.types";
+import { agruparDespiece } from "../../sync/agrupar-despiece";
 
 // diseño.md §5 / §3.6 — "Agregar orden": trae la cabecera y todas las
 // piezas de placar de la orden desde TeoWin (solo lectura) y las escribe
@@ -78,36 +78,31 @@ export async function syncOrdenFromTeowin(codigoOrdenFabricacion: number) {
           },
         });
 
-        const rowsDeModulo = rowsDePedido.filter((r) => r.modulo_id === moduloId);
-        const piezaTipoIds = [...new Set(rowsDeModulo.map((r) => r.pieza_tipo_id))];
+        // Una fila de TeoWin no siempre es una pieza física (ver agruparDespiece).
+        const gruposDeModulo = agruparDespiece(rowsDePedido.filter((r) => r.modulo_id === moduloId));
 
-        for (const piezaTipoId of piezaTipoIds) {
-          const rowsDePieza: TeowinDespieceRow[] = rowsDeModulo.filter(
-            (r) => r.pieza_tipo_id === piezaTipoId,
-          );
-          const sample = rowsDePieza[0];
-
+        for (const grupo of gruposDeModulo) {
           const despieceTipo = await tx.despieceTipo.create({
             data: {
               modulo_id: modulo.id,
-              familia: sample.familia,
-              articulo: sample.articulo,
-              color: sample.color,
-              descripcion: sample.pieza_descripcion,
-              medida1: sample.medida1,
-              medida2: sample.medida2,
+              familia: grupo.familia,
+              articulo: grupo.articulo,
+              color: grupo.color,
+              descripcion: grupo.pieza_descripcion,
+              medida1: grupo.medida1,
+              medida2: grupo.medida2,
               medida3: null,
-              idCatalogo: sample.idCatalogo,
-              unidades: sample.unidades,
+              idCatalogo: grupo.idCatalogo,
+              unidades: grupo.idUnicos.length,
               estado: "PENDIENTE",
             },
           });
 
           await tx.piezaFisica.createMany({
-            data: rowsDePieza.map((r) => ({
+            data: grupo.idUnicos.map((idUnico) => ({
               despiece_tipo_id: despieceTipo.id,
-              idUnico: r.idunico,
-              estado: "PENDIENTE",
+              idUnico,
+              estado: "PENDIENTE" as const,
             })),
           });
         }

@@ -83,7 +83,7 @@ app/backend/
 │       ├── pedidos/            # Consultar pedidos, marcar "finalizado"
 │       ├── modulos/            # Consultar módulos (muebles), marcar "finalizado"
 │       ├── piezas/             # Escanear, confirmar manualmente, listar piezas
-│       └── sync/                # Las queries de solo-lectura contra TeoWin
+│       └── sync/                # Las queries de solo-lectura contra TeoWin + agrupar-despiece.ts (cuántas piezas físicas es cada fila)
 └── .env / .env.example
 ```
 
@@ -171,11 +171,11 @@ Si el despiece dice "3 estantes iguales", eso es **un** `DespieceTipo` (familia/
 
 | Tabla | Campos propios (además de `id`, `estado`, `creado_en`, `eliminado_en`) | Se llena cuando... |
 |---|---|---|
-| `orden` | `codigoOrdenFabricacion`, `numeroOrdenCustom`, `descripcion` | Se aprieta "Agregar orden" |
+| `orden` | `codigoOrdenFabricacion`, `numeroOrdenCustom`, `descripcion`, `archivada_en` (nullable) | Se aprieta "Agregar orden" |
 | `pedido` | `orden_id`, `codigo_pedido`, `referencia`, `nombreComercial` | Junto con la orden |
 | `modulo` | `pedido_id`, `idEscena`, `descripcion` | Junto con la orden |
 | `despiece_tipo` | `modulo_id`, `familia`, `articulo`, `color`, `descripcion`, `medida1`, `medida2`, `medida3`, `idCatalogo`, `unidades` | Junto con la orden |
-| `pieza_fisica` | `despiece_tipo_id`, `idUnico`, `escaneado_en` | Junto con la orden |
+| `pieza_fisica` | `despiece_tipo_id`, `idUnico` (nulo si la pieza no tiene etiqueta), `escaneado_en` | Junto con la orden |
 
 Todos los campos que vienen directo de TeoWin (`idEscena`, `idCatalogo`, `familia`, `articulo`, `color`, `medida1/2/3`, `codigoOrdenFabricacion`, `idUnico`, etc.) mantienen el mismo nombre que tienen allá, para que sea fácil rastrear de dónde sale cada dato. Los campos que son solo nuestros usan `snake_case` (`creado_en`, `codigo_pedido`, etc.).
 
@@ -187,7 +187,9 @@ Todos los campos que vienen directo de TeoWin (`idEscena`, `idCatalogo`, `famili
 | `pedido` / `modulo` / `despiece_tipo` | `PENDIENTE` → `EN_PRODUCCION` → `FINALIZADO`, o `ELIMINADO` |
 | `pieza_fisica` | `PENDIENTE` → `CORTADA`, o `ELIMINADA` |
 
-`ELIMINADO`/`ELIMINADA` no es un borrado físico — es un estado más, que se usa cuando una orden se descarta (para no perder el historial de lo que ya se había cortado).
+`ELIMINADO`/`ELIMINADA` no es un borrado físico — es un estado más, que se usa cuando una orden se elimina (para no perder el historial de lo que ya se había cortado). Los módulos, pedidos y tipos de pieza usan `EN_PRODUCCION` (se muestra "En producción") como estado intermedio; solo la orden lo llama `EN_PROCESO`.
+
+**Archivar no es un estado**: `orden.archivada_en` (timestamp nullable) solo oculta la orden del listado inicial. La orden sigue vigente — conserva su `estado`, sigue ocupando su número en el índice único y sus piezas se pueden seguir escaneando.
 
 ### Por qué cada fila tiene su propio `id` en vez de usar el código de TeoWin
 
@@ -216,11 +218,17 @@ Esto es lo que hace que **"Agregar orden" con un número ya cargado y activo fal
 ### 1. Sincronizar una orden es una copia completa, una sola vez
 
 Al apretar "Agregar orden" con un número de orden de fabricación:
-1. Se busca esa orden en TeoWin (cabecera + todos sus pedidos con piezas de placar — se detecta por `idCatalogo = 4` en `tdespieceLineaPresupuesto`, que es el catálogo "Placares" del Maestro de Productos. **No** se filtra por familia de artículo: familias como `PZA` existen también en otros catálogos, ej. Cocinas, con artículos totalmente distintos).
+1. Se busca esa orden en TeoWin (cabecera + todos sus pedidos con piezas de placar — se detecta por `idCatalogo = 4` en `tdespieceLineaPresupuesto`, que es el catálogo "Placares" del Maestro de Productos. Además, solo cuentan las familias del listado de corte de TeoWin — `tFamiliasListadosFabricacion`, listado `A02`, catálogo 4: hoy `PZPP`, `PZD`, `PZC`, `PZA` — para excluir tarugos, herrajes, guías y tiradores que el catálogo 4 también marca como escandallo. No se usa una lista fija: familias como `PZA` existen también en otros catálogos, ej. Cocinas, con artículos totalmente distintos, y en placares los paneles son `PZPP`, no `PZP`. Las piezas sin código de barras (ej. paneles `PZPP/PAN`, con `unidades` fraccionarias 0,5 / 0,25) se agrupan por tipo y se cuentan sumando unidades; quedan con `idUnico` nulo y se finalizan con el botón manual).
 2. Si no existe en TeoWin → error 404.
 3. Si no tiene ninguna pieza de placar → error 422.
-4. Si ya hay una orden **activa** con ese mismo número en la base propia → error 409 (hay que descartarla primero — esa función de "Descartar" todavía no está implementada en el frontend).
+4. Si ya hay una orden **activa** con ese mismo número en la base propia → error 409 (hay que eliminarla primero con el botón "Eliminar" del listado, ver regla 6).
 5. Si nada de eso pasa, se crea todo (orden → pedidos → módulos → tipos de pieza → piezas físicas) en una sola operación de base de datos (si algo falla a mitad de camino, no queda nada a medias).
+
+**Qué filas del despiece son piezas de corte**: además de `idCatalogo = 4` y `siEscandallo = 1`, la familia tiene que estar en el listado de corte de TeoWin — `tFamiliasListadosFabricacion`, `codigoListado = 'A02'`, `idCatalogo = 4` (hoy `PZPP`, `PZD`, `PZC`, `PZA`), leído con una subconsulta `EXISTS` en `fetchOrdenDespiece`, no fijado en el código. Sin eso el catálogo 4 trae también tarugos (`TAR3D`), herrajes (`HER3D`), guías (`GC3D`) y tiradores (`TIR`). Ojo: la familia de paneles es `PZPP` (en Cocinas, catálogo 3, es `PZP`).
+
+**Cuántas piezas físicas es cada fila** (`src/modules/sync/agrupar-despiece.ts`): las filas con código único (`tdespieceLineaPresupuestoUnico`) generan una `PiezaFisica` por `idUnico`. Las filas **sin** código único (ej. paneles `PZPP/PAN`, que no llevan etiqueta) tienen `unidades` fraccionarias (0,5 / 0,25: varias filas componen una pieza), así que se agrupan por módulo + familia/artículo/color/medidas, se suman las unidades y se crea `ceil(suma)` piezas con `idUnico = null`. Esas piezas no se escanean: se dan por cortadas con el botón manual.
+
+**Descripciones**: `tArticuloDescripciones` carga el español como `'ESP'` (completo) y como `'ES'` (parcial). El join usa `OUTER APPLY (SELECT TOP 1 ...)` prefiriendo `'ESP'` y filtrando por `idCatalogo`, para no duplicar filas ni dejar piezas sin descripción.
 
 Después de sincronizada, la orden vive **solo** en la base propia — no se vuelve a consultar TeoWin para verla ni actualizarla automáticamente.
 
@@ -250,6 +258,31 @@ No hay forma automática de saber "ya se cortó todo lo de este módulo/pedido",
 - **Pieza** no tiene un estado "finalizado" propio (su `estado` solo tiene `PENDIENTE`/`CORTADA`/`ELIMINADA`) — el botón "Marcar finalizado" de una pieza usa el mismo camino que el escaneo: la marca `CORTADA` directamente. Sirve para las piezas que nunca se escanean.
 - **Orden** no tiene botón propio: pasa a `LISTA` automáticamente, pero recién cuando el **100%** de sus pedidos (no eliminados) están `FINALIZADO`. Eso sí es inequívoco, por eso es la única regla automática de cierre.
 
+### 4. Deshacer: volver a `PENDIENTE`
+
+Cada nivel tiene un botón "Pendiente" (siempre vuelve a `PENDIENTE`, nunca a un estado intermedio). La regla está atada al modelo hijo y la valida el backend (`409` con un mensaje que indica cuántos hijos bloquean):
+
+| Nivel | Se puede pasar a Pendiente si... |
+|---|---|
+| Pieza | Está `CORTADA` (limpia `escaneado_en`). Sin restricciones: es la hoja |
+| Módulo | **Ninguna** de sus piezas está `CORTADA` |
+| Pedido | Todos sus módulos (no eliminados) están `PENDIENTE` |
+| Orden | Todos sus pedidos (no eliminados) están `PENDIENTE` |
+
+Para deshacer un módulo con piezas cortadas hay que deshacer primero cada pieza. Bajar un padre a `PENDIENTE` es **siempre manual**: deshacer la última pieza cortada no baja solo al módulo/pedido/orden. La única cascada automática hacia abajo es de consistencia: si un pedido `FINALIZADO` vuelve a `PENDIENTE` y su orden estaba `LISTA`, la orden pasa a `EN_PROCESO` (`LISTA` significa "todos los pedidos finalizados").
+
+### 5. Re-escaneo
+
+`POST /piezas/escanear` de una pieza que ya estaba `CORTADA` no falla ni cambia nada: responde igual, con `yaEscaneada: true`, para que la pantalla avise (popup amarillo en vez de verde).
+
+### 6. Eliminar una orden (soft delete)
+
+`DELETE /ordenes/:id` (diseño.md §5.2, "Descartar" en el diseño): en una transacción, marca la orden, sus pedidos, módulos y tipos de pieza como `ELIMINADO` y sus piezas físicas como `ELIMINADA`, con `eliminado_en`. **Nada se borra físicamente** y **TeoWin no se toca**. Se puede eliminar una orden en cualquier estado (incluso con piezas cortadas: el historial se conserva). Consecuencias: desaparece del listado, escanear una de sus etiquetas responde `410`, y como sale del índice único parcial, el mismo número de orden se puede volver a agregar desde TeoWin.
+
+### 7. Archivar una orden
+
+`PATCH /ordenes/:id/archivar` y `/desarchivar` solo setean/limpian `archivada_en`. No cambia el estado ni bloquea el escaneo. `GET /ordenes` devuelve solo las no archivadas; con `?archivadas=true`, solo las archivadas.
+
 ---
 
 ## Documentación de la API
@@ -274,10 +307,14 @@ Base URL en desarrollo: `http://localhost:4000/api`
 
 | Método y ruta | Qué hace | Body / respuesta |
 |---|---|---|
-| `GET /ordenes` | Lista las órdenes activas (no `ELIMINADO`), más recientes primero | `data`: array de `{ id, codigoOrdenFabricacion, numeroOrdenCustom, descripcion, estado, creado_en, pedidosCount }` |
+| `GET /ordenes` | Lista las órdenes vigentes **no archivadas**, más recientes primero. `?archivadas=true` devuelve solo las archivadas | `data`: array de `{ id, codigoOrdenFabricacion, numeroOrdenCustom, descripcion, estado, creado_en, archivada_en, pedidosCount }` |
 | `POST /ordenes` | Sincroniza una orden nueva desde TeoWin | body: `{ "codigoOrdenFabricacion": 263500002 }` → `data`: la orden creada. Errores: `404` (no existe en TeoWin), `422` (sin piezas de placar), `409` (ya activa) |
 | `GET /ordenes/:id` | Detalle de una orden | `data`: mismo shape que en la lista |
 | `GET /ordenes/:id/pedidos` | Pedidos de esa orden | `data`: array de `{ id, codigo_pedido, referencia, nombreComercial, estado, modulosCount }` |
+| `PATCH /ordenes/:id/pendiente` | Vuelve la orden a `PENDIENTE` (regla 4). `409` si algún pedido no está `PENDIENTE` | `data`: la orden |
+| `PATCH /ordenes/:id/archivar` | Archiva la orden (regla 7) | `data`: la orden |
+| `PATCH /ordenes/:id/desarchivar` | Desarchiva la orden | `data`: la orden |
+| `DELETE /ordenes/:id` | Elimina la orden con soft delete en cascada (regla 6). `404` si no existe o ya está eliminada | `data`: la orden (con `estado: "ELIMINADO"`) |
 
 ### Pedidos
 
@@ -286,6 +323,7 @@ Base URL en desarrollo: `http://localhost:4000/api`
 | `GET /pedidos/:id` | Detalle de un pedido | `data`: los campos del pedido + `orden: { id, numeroOrdenCustom, descripcion }` |
 | `GET /pedidos/:id/modulos` | Módulos de ese pedido | `data`: array de `{ id, idEscena, descripcion, estado, despieceTiposCount }` |
 | `PATCH /pedidos/:id/finalizar` | Marca el pedido como `FINALIZADO` (y revisa si hay que pasar la orden a `LISTA`) | `data`: el pedido actualizado |
+| `PATCH /pedidos/:id/pendiente` | Vuelve el pedido a `PENDIENTE` (regla 4). `409` si algún módulo no está `PENDIENTE`. Si la orden estaba `LISTA`, pasa a `EN_PROCESO` | `data`: el pedido actualizado |
 
 ### Módulos
 
@@ -294,6 +332,7 @@ Base URL en desarrollo: `http://localhost:4000/api`
 | `GET /modulos/:id` | Detalle de un módulo | `data`: los campos del módulo + `pedido: { id, codigo_pedido, nombreComercial }` + `orden: { id, numeroOrdenCustom }` |
 | `GET /modulos/:id/piezas` | Piezas físicas de ese módulo | `data`: array de `{ id, idUnico, familia, articulo, color, descripcion, medida1, medida2, estado, escaneado_en }` |
 | `PATCH /modulos/:id/finalizar` | Marca el módulo como `FINALIZADO` | `data`: el módulo actualizado |
+| `PATCH /modulos/:id/pendiente` | Vuelve el módulo a `PENDIENTE` (regla 4). `409` si alguna pieza está `CORTADA` | `data`: el módulo actualizado |
 
 ### Piezas
 
@@ -301,11 +340,13 @@ Base URL en desarrollo: `http://localhost:4000/api`
 |---|---|---|
 | `POST /piezas/escanear` | El operario escaneó un código de barras — marca la pieza `CORTADA` y dispara la cascada | body: `{ "idUnico": "2195136" }` (string de **exactamente 7 dígitos**) → `data`: resumen (ver abajo). Errores: `400` (formato inválido), `404` (código no existe), `410` (la pieza pertenece a una orden descartada) |
 | `PATCH /piezas/:id/confirmar` | Confirmación manual (Vista 4) — mismo efecto que escanear, pero por `id` propio en vez de código de barras | `data`: mismo resumen que el escaneo |
+| `PATCH /piezas/:id/pendiente` | Deshace el corte: `CORTADA` → `PENDIENTE` y limpia `escaneado_en` (regla 4). `410` si la pieza pertenece a una orden eliminada | `data`: `{ id, estado, modulo_id }` |
 
-El **resumen** que devuelven `escanear` y `confirmar` (para mostrar en pantalla qué se acaba de marcar):
+El **resumen** que devuelven `escanear` y `confirmar` (para mostrar en pantalla qué se acaba de marcar). `yaEscaneada` es `true` si la pieza ya estaba `CORTADA` antes de este llamado (regla 5):
 
 ```json
 {
+  "yaEscaneada": false,
   "pieza":  { "id": "05eeafec-874b-411e-9291-efc1bfab393b", "idUnico": 2200984, "familia": "PZA", "articulo": "F", "color": "FGG", "descripcion": "...", "medida1": "2310", "medida2": "1083" },
   "modulo": { "id": "15473367-afba-4c76-a547-9f107b58036e", "idEscena": 12, "descripcion": "VESTIDOR NEO 2200 PROF. 345 - 2 MÓDULOS" },
   "pedido": { "id": "596f87b8-cb0b-4022-8562-4a593419460b", "codigo_pedido": "26-02473", "referencia": "Ed.Torre Zeus-7A Vestidor" },
@@ -336,5 +377,8 @@ El script [`prisma/teowin-readonly-login.sql`](prisma/teowin-readonly-login.sql)
 | `Faltan credenciales de TeoWin en el .env` al sincronizar una orden | No completaste `TEOWIN_DB_*` en `.env` | Completá esas variables (ver [Variables de entorno](#variables-de-entorno)) |
 | `Failed to connect to <servidor>:1433` | El servidor es una **instancia con nombre** (ej. `SRVTEOWIN\TEOWIN`) y falta `TEOWIN_DB_INSTANCE` | Completá `TEOWIN_DB_INSTANCE` con el nombre de instancia (lo ves en la config de conexión de SSMS) |
 | El servidor arranca pero se cae solo (crash) al sincronizar una orden | Dependencias de `node_modules` corruptas (pasa si se instala/desinstala un paquete a mano) | `rm -rf node_modules` (o borrarla en el explorador) y `npm ci` para reinstalar todo limpio desde `package-lock.json` |
-| `409 Conflict` ("ya existe un registro activo") al sincronizar una orden que **sí** aparece en el listado de la app | Ya existe una fila activa con ese `codigoOrdenFabricacion` en la base propia | Es el comportamiento esperado — para recargarla hay que descartarla primero (función pendiente en el frontend) |
+| `409 Conflict` ("ya existe un registro activo") al sincronizar una orden que **sí** aparece en el listado de la app | Ya existe una fila activa con ese `codigoOrdenFabricacion` en la base propia | Es el comportamiento esperado — para recargarla hay que eliminarla primero (botón "Eliminar" del listado) |
 | `409 Conflict` al sincronizar una orden que **no** aparece en ningún lado de la app (nunca se sincronizó) | `tArticuloDescripciones` puede tener más de una fila para el mismo familia/articulo/idioma con distinto `idCatalogo` — sin filtrar por `idCatalogo` en el join de descripción (`src/modules/sync/teowin-orden.queries.ts`), se duplican filas y dos piezas con el mismo `idUnico` terminan en el mismo `INSERT`, lo que dispara el índice único de la sección 8.3 con un mensaje engañoso ("ya existe") aunque la orden nunca se llegó a crear | Ya corregido (el join ahora exige `ad.idCatalogo = d.idCatalogo`/`= padre.idCatalogo`) — si vuelve a aparecer con otra orden, correr la query de `fetchOrdenDespiece` a mano y comparar el conteo de filas con/sin ese join |
+| Un módulo muestra menos piezas que el escandallo de TeoWin | Familia de corte que no estaba en el filtro (caso real: los paneles `PZPP/PAN` del módulo 38 del pedido `26-02149`, 40 en vez de 42) o órdenes sincronizadas antes de la corrección | El filtro ahora sale de `tFamiliasListadosFabricacion` (listado `A02`, catálogo 4). Para órdenes ya cargadas hay que completarlas (solo agregando filas) o eliminarlas y volver a agregarlas — ver la regla 1 |
+| `409` al apretar "Pendiente" en un módulo/pedido/orden | Tiene hijos que no están en `PENDIENTE` (regla 4) | Es esperado: el mensaje dice cuántos. Hay que deshacer primero los hijos |
+| `npm run build`/`tsc` falla con `Invalid value for '--ignoreDeprecations'` | `tsconfig.json` tiene `"ignoreDeprecations": "6.0"` pero el TypeScript instalado es 5.9 (`npm run dev` no se ve afectado: `tsx` no chequea tipos) | Pendiente de decidir: subir TypeScript a 6 o cambiar el valor a `"5.0"` |

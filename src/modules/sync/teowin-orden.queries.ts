@@ -6,6 +6,24 @@ import type {
   TeowinPedidoInfo,
 } from "./teowin-orden.types";
 
+// Qué filas del despiece son piezas de CORTE (y no tarugos, herrajes, guías,
+// tiradores, etc.). BUG REAL (orden 263500002, pedido 26-02149, módulo 38:
+// 40 piezas en la app vs. 42 en el escandallo): faltaban los paneles
+// PZPP/PAN. Filtrar solo por idCatalogo = 4 no alcanza — el catálogo de
+// placares también trae TAR3D/HER3D/GC3D/TIR marcados siEscandallo — y la
+// lista fija PZA/PZC/PZD/PZP que documentaba diseño.md §3.2 es la del
+// catálogo 3 (Cocinas): en el catálogo 4 la familia de paneles se llama
+// PZPP, no PZP. La fuente de verdad es el propio listado de corte de
+// TeoWin: tFamiliasListadosFabricacion, listado A02, catálogo 4 (hoy PZPP,
+// PZD, PZC, PZA). Se lee de ahí, en vez de fijarla en el código, para que
+// una familia nueva en ese listado entre sola.
+const FAMILIAS_DE_CORTE = `EXISTS (
+         SELECT 1 FROM tFamiliasListadosFabricacion fl
+         WHERE fl.codigoListado = 'A02'
+           AND fl.idCatalogo = 4
+           AND fl.empresa = d.empresa
+           AND fl.familia = d.familia)`;
+
 // diseño.md §3.1 — cabecera de la orden (descripción, número corto).
 export async function fetchOrdenCabecera(orden: number): Promise<TeowinOrdenCabecera | null> {
   const rows = await teowinQuery<TeowinOrdenCabecera>(
@@ -41,8 +59,10 @@ export async function fetchOrdenCabecera(orden: number): Promise<TeowinOrdenCabe
 // para un mismo familia/articulo/idCatalogo pueden existir ambas filas, el
 // join se hace con OUTER APPLY TOP 1 (prefiere 'ESP') para no duplicar filas
 // (mismo fan-out del bug descrito arriba). Igual en fetchModulosDePedido.
-// Filtro de "es una pieza de placar": d.idCatalogo = 4, NO familia IN
-// ('PZA','PZC','PZD','PZP') como decía diseño.md §3.2 originalmente.
+// Filtro de "es una pieza de placar": d.idCatalogo = 4 (separa las líneas de
+// producto) MÁS pertenecer a las familias de corte del catálogo 4 (ver
+// FAMILIAS_DE_CORTE arriba) — no la lista fija PZA/PZC/PZD/PZP de diseño.md
+// §3.2 original, que es la del catálogo 3.
 // Confirmado con el Maestro de Productos de TeoWin que las mismas familias
 // (ej. PZA) existen con artículos distintos en el catálogo 3 (Cocinas) y en
 // el catálogo 4 (Placares) — filtrar solo por familia podía traer piezas de
@@ -76,7 +96,8 @@ export async function fetchOrdenDespiece(orden: number): Promise<TeowinDespieceR
      ) ad
      WHERE ofab.codigoOrdenFabricacion = @orden
        AND d.siEscandallo = 1
-       AND d.idCatalogo = 4`,
+       AND d.idCatalogo = 4
+       AND ${FAMILIAS_DE_CORTE}`,
     { orden },
   );
 }
