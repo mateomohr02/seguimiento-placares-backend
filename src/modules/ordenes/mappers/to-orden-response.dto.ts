@@ -11,6 +11,7 @@ export function toOrdenResponseDTO(
     descripcion: orden.descripcion,
     estado: orden.estado,
     creado_en: orden.creado_en.toISOString(),
+    archivada_en: orden.archivada_en ? orden.archivada_en.toISOString() : null,
     pedidosCount: orden.pedidos.length,
   };
 }

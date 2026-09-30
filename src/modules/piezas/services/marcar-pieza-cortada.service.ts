@@ -54,6 +54,9 @@ export async function marcarPiezaCortada(where: { id: string } | { idUnico: numb
       );
     }
 
+    // Si ya estaba CORTADA es un re-escaneo: el frontend lo muestra distinto.
+    const yaEscaneada = piezaFisica.estado === "CORTADA";
+
     if (piezaFisica.estado === "PENDIENTE") {
       await tx.piezaFisica.update({
         where: { id: piezaFisica.id },
@@ -80,6 +83,7 @@ export async function marcarPiezaCortada(where: { id: string } | { idUnico: numb
     }
 
     return {
+      yaEscaneada,
       pieza: {
         id: piezaFisica.id,
         idUnico: piezaFisica.idUnico,

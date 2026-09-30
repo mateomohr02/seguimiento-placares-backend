@@ -5,5 +5,6 @@ export interface OrdenResponseDTO {
   descripcion: string;
   estado: string;
   creado_en: string;
+  archivada_en: string | null;
   pedidosCount: number;
 }

@@ -59,6 +59,7 @@ model Orden {
   estado                OrdenEstado @default(PENDIENTE)
   creado_en             DateTime    @default(now())
   eliminado_en          DateTime?
+  archivada_en          DateTime? // archivar solo oculta la orden del listado inicial; no cambia su estado ni libera el codigoOrdenFabricacion
 
   pedidos Pedido[]
 
