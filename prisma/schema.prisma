@@ -61,7 +61,8 @@ model Orden {
   eliminado_en          DateTime?
   archivada_en          DateTime? // archivar solo oculta la orden del listado inicial; no cambia su estado ni libera el codigoOrdenFabricacion
 
-  pedidos Pedido[]
+  pedidos     Pedido[]
+  hojasCorte  HojaCorte[]
 
   @@map("orden")
 }
@@ -131,4 +132,24 @@ model PiezaFisica {
   despieceTipo DespieceTipo @relation(fields: [despiece_tipo_id], references: [id])
 
   @@map("pieza_fisica")
+}
+
+// Hojas de corte (PDF) de una orden — feature/visor-hojas-corte. Tabla aparte, no
+// toca ninguna de las existentes. El PDF se guarda en Postgres (bytea) para que
+// el pg_dump de §10.3 sea el único backup. Una orden puede tener varias hojas
+// (ej. MDP por un lado y MDF por otro, cada una con su "nombre"). Borrado lógico.
+model HojaCorte {
+  id             String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orden_id       String    @db.Uuid
+  nombre         String
+  nombre_archivo String
+  tamano         Int
+  contenido      Bytes
+  creado_en      DateTime  @default(now())
+  eliminado_en   DateTime?
+
+  orden Orden @relation(fields: [orden_id], references: [id])
+
+  @@index([orden_id])
+  @@map("hoja_corte")
 }
