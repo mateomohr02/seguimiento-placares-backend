@@ -148,8 +148,34 @@ model HojaCorte {
   creado_en      DateTime  @default(now())
   eliminado_en   DateTime?
 
-  orden Orden @relation(fields: [orden_id], references: [id])
+  orden       Orden                @relation(fields: [orden_id], references: [id])
+  anotaciones HojaCorteAnotacion[]
 
   @@index([orden_id])
   @@map("hoja_corte")
+}
+
+enum AnotacionTipo {
+  TEXTO
+  DIBUJO
+}
+
+// Anotaciones sobre una hoja de corte. El PDF original nunca se modifica: las
+// anotaciones se dibujan encima en el visor. `pagina` null = nota del documento
+// (aplica a toda la hoja, ej. "las págs. 77 a 80 son MDF"). Las coordenadas en
+// `datos` están normalizadas (0..1 sobre el ancho/alto de la página) para no
+// depender del zoom ni del dispositivo. Borrado lógico.
+model HojaCorteAnotacion {
+  id            String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  hoja_corte_id String        @db.Uuid
+  pagina        Int?
+  tipo          AnotacionTipo
+  datos         Json
+  creado_en     DateTime      @default(now())
+  eliminado_en  DateTime?
+
+  hojaCorte HojaCorte @relation(fields: [hoja_corte_id], references: [id])
+
+  @@index([hoja_corte_id])
+  @@map("hoja_corte_anotacion")
 }

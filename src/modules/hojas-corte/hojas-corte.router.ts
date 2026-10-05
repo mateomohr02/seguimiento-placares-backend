@@ -5,6 +5,11 @@ import {
   eliminarHojaController,
   listHojasController,
 } from "./controllers/hojas-corte.controller";
+import {
+  crearAnotacionController,
+  eliminarAnotacionController,
+  listAnotacionesController,
+} from "./controllers/anotaciones.controller";
 import { MAX_PDF_BYTES } from "./services/hojas-corte.service";
 
 // Hojas de corte (PDF) por orden — módulo aditivo, no modifica las rutas existentes.
@@ -17,3 +22,6 @@ hojasDeOrdenRouter.post("/", express.raw({ type: "application/pdf", limit: MAX_P
 export const hojasCorteRouter = Router();
 hojasCorteRouter.get("/:id/archivo", archivoHojaController);
 hojasCorteRouter.delete("/:id", eliminarHojaController);
+hojasCorteRouter.get("/:id/anotaciones", listAnotacionesController);
+hojasCorteRouter.post("/:id/anotaciones", crearAnotacionController);
+hojasCorteRouter.delete("/:id/anotaciones/:anotacionId", eliminarAnotacionController);
