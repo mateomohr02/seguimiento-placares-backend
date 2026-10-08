@@ -127,8 +127,7 @@ Copiá `.env.example` a `.env` y completá los valores. Nunca se sube `.env` al 
 | `TEOWIN_DB_PASSWORD` | Contraseña de ese usuario | — |
 | `TEOWIN_DB_ENCRYPT` | Si la conexión requiere cifrado (mirar la config de conexión en SSMS) | `true` |
 | `TEOWIN_DB_TRUST_SERVER_CERTIFICATE` | Aceptar el certificado del servidor sin validarlo contra una CA pública | `true` |
-| `PIN_PEPPER` | **Obligatoria.** Clave con que se hashea cada PIN (HMAC-SHA256). Mínimo 16 caracteres, aleatoria. **Si se cambia, hay que regenerar el `pin_hash` de todos los usuarios** | `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"` |
-| `SESSION_SECRET` | **Obligatoria.** Clave que firma las sesiones. Mínimo 16 caracteres, aleatoria. Si se cambia, solo se cierran las sesiones abiertas | (ídem) |
+| `SESSION_SECRET` | **Obligatoria.** Clave que firma las sesiones. Mínimo 16 caracteres, aleatoria. Si se cambia, solo se cierran las sesiones abiertas | `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"` |
 | `SESSION_HORAS` | Duración de la sesión en horas (por defecto `12`) | `12` |
 
 **Importante sobre el usuario de TeoWin**: tiene que tener permisos acotados a `SELECT` únicamente (nunca `db_datawriter`, nunca `sa`). Ver [TeoWin: restricción de solo lectura](#teowin-restricción-de-solo-lectura) más abajo — hay un script listo para crear ese usuario.
@@ -217,7 +216,7 @@ Cuatro tablas más, también por migración **solo aditiva** (`20261008120000_us
 | `rol` | `id`, `nombre` (único), `descripcion` | Los roles: `admin`, `tecnica`, `fabrica`, `gerencia` |
 | `permiso` | `clave` (PK), `descripcion` | Las funcionalidades (ej. `piezas.marcar`) |
 | `rol_permiso` | `rol_id`, `permiso_clave` (PK compuesta) | **Qué funcionalidades tiene cada rol** |
-| `usuario` | `id`, `nombre` (único), `pin_hash` (único), `rol_id`, `activo`, `creado_en`, `ultimo_acceso` | Un usuario = una persona o una estación de trabajo |
+| `usuario` | `id`, `nombre` (único), `pin` (único, texto plano), `rol_id`, `activo`, `creado_en`, `ultimo_acceso` | Un usuario = una persona o una estación de trabajo |
 
 Un usuario no se borra: se le pone `activo = false`. Detalle de qué permite cada rol en la [regla 9](#9-usuarios-roles-y-permisos).
 
@@ -332,7 +331,7 @@ Antes había botones y endpoints manuales para finalizar módulos y pedidos y pa
 Todo `/api/*` exige sesión salvo `GET /api/health` y `POST /api/auth/login`. Cada ruta, además, declara el permiso que necesita (`requierePermiso(PERMISOS.…)` en su router).
 
 - **Login**: `POST /api/auth/login` con `{ "pin": "123456" }`. El PIN identifica al usuario. Devuelve `{ token, expiraEnSegundos, usuario: { nombre, rol } }`; el frontend guarda el token en una cookie httpOnly y lo reenvía como `Authorization: Bearer <token>`.
-- **PIN**: numérico de 4 a 10 dígitos (se recomiendan 6) y único. Se guarda como `pin_hash` = HMAC-SHA256 con `PIN_PEPPER`, nunca en texto plano.
+- **PIN**: numérico de 4 a 10 dígitos (se recomiendan 6) y único. **Se guarda en texto plano** en `usuario.pin` (decisión del usuario; cualquiera con lectura a la base ve los PIN, incluidos los backups).
 - **Sesión**: token firmado con `SESSION_SECRET`, dura `SESSION_HORAS`. Lleva solo el id de usuario y el vencimiento: **el rol y los permisos se leen de la base en cada pedido**, así que una baja (`activo = false`) o un cambio en `rol_permiso` rige de inmediato.
 - **Límite de intentos**: 8 PIN incorrectos en 10 minutos bloquean el login con `429`, por IP y en memoria (se reinicia con el servidor). Como el backend ve la IP del frontend, en la práctica es global.
 - **Errores**: `401` sin sesión válida (falta el token, venció, está alterado o el usuario está inactivo); `403` si el usuario no tiene el permiso.
@@ -355,21 +354,21 @@ Los usuarios `fabrica` son las estaciones de trabajo (`cortadora1`, `rover1`, `a
 
 #### Alta de usuarios
 
-No hay pantalla: se da de alta desde la base. El script genera el `INSERT` con el PIN ya hasheado (usa `PIN_PEPPER` del `.env`):
+No hay pantalla: se da de alta desde la base. El script genera el `INSERT`:
 
 ```powershell
 cd app\backend
 npm run usuario:sql -- "rover1" fabrica 123456
 ```
 
-Imprime algo como `INSERT INTO usuario (nombre, pin_hash, rol_id) VALUES ('rover1', '…', (SELECT id FROM rol WHERE nombre = 'fabrica'));`, que se ejecuta en psql / pgAdmin / Prisma Studio. Roles válidos: `admin`, `tecnica`, `fabrica`, `gerencia`. Otras operaciones, directo en SQL:
+Imprime algo como `INSERT INTO usuario (nombre, pin, rol_id) VALUES ('rover1', '123456', (SELECT id FROM rol WHERE nombre = 'fabrica'));`, que se ejecuta en psql / pgAdmin / Prisma Studio. Roles válidos: `admin`, `tecnica`, `fabrica`, `gerencia`. Otras operaciones, directo en SQL:
 
 ```sql
 UPDATE usuario SET activo = false WHERE nombre = 'rover1';              -- dar de baja (cierra su sesión de inmediato)
 UPDATE usuario SET rol_id = (SELECT id FROM rol WHERE nombre = 'tecnica') WHERE nombre = 'rover1';  -- cambiar de rol
 ```
 
-Para cambiar el PIN de alguien, generar un `INSERT` nuevo con el script y usar el `pin_hash` que imprime en un `UPDATE usuario SET pin_hash = '…' WHERE nombre = '…'`. Para **agregar un permiso nuevo**: insertarlo en `permiso` y asignarlo en `rol_permiso` (también a `admin`: no tiene acceso implícito a todo); el código lo referencia con `requierePermiso`.
+Para cambiar el PIN de alguien: `UPDATE usuario SET pin = '654321' WHERE nombre = 'rover1';` (tiene que ser numérico y único). Para **agregar un permiso nuevo**: insertarlo en `permiso` y asignarlo en `rol_permiso` (también a `admin`: no tiene acceso implícito a todo); el código lo referencia con `requierePermiso`.
 
 > No guardes PIN en archivos del proyecto ni en el historial de git. Evitá pasar PIN reales en la línea de comandos de una máquina compartida (queda en el historial de la terminal).
 
@@ -508,8 +507,8 @@ El script [`prisma/teowin-readonly-login.sql`](prisma/teowin-readonly-login.sql)
 | Un módulo muestra menos piezas que el escandallo de TeoWin | Familia de corte que no estaba en el filtro (caso real: los paneles `PZPP/PAN` del módulo 38 del pedido `26-02149`, 40 en vez de 42) o órdenes sincronizadas antes de la corrección | El filtro ahora sale de `tFamiliasListadosFabricacion` (listado `A02`, catálogo 4). Para órdenes ya cargadas hay que completarlas (solo agregando filas) o eliminarlas y volver a agregarlas — ver la regla 1 |
 | `prisma generate` falla con `EPERM: operation not permitted, rename ...query_engine-windows.dll.node` | El backend (`npm run dev`, `tsx watch`) está corriendo y tiene la DLL de Prisma abierta | Detené el backend, corré `npx prisma generate` y volvelo a levantar |
 | Subir un PDF o plano falla con `413` | Supera los 40 MB | Reducir el archivo; el límite está en `MAX_PDF_BYTES` / `MAX_PLANO_BYTES` |
-| El backend no arranca: `PIN_PEPPER debe tener al menos 16 caracteres` (o `SESSION_SECRET`) | Falta completar esas variables en `.env` (son obligatorias desde la feature de usuarios) | Generá un valor aleatorio largo (ver [Variables de entorno](#variables-de-entorno)) |
-| Toda la app responde `401` / pide PIN y no hay forma de entrar | No hay ningún usuario cargado (la migración no crea usuarios) o el PIN se hasheó con otro `PIN_PEPPER` | Cargar un usuario con `npm run usuario:sql` (ver [Alta de usuarios](#alta-de-usuarios)). Si se cambió `PIN_PEPPER`, regenerar el `pin_hash` de todos |
+| El backend no arranca: `SESSION_SECRET debe tener al menos 16 caracteres` | Falta completar esa variable en `.env` (es obligatoria desde la feature de usuarios) | Generá un valor aleatorio largo (ver [Variables de entorno](#variables-de-entorno)) |
+| Toda la app responde `401` / pide PIN y no hay forma de entrar | No hay ningún usuario cargado (la migración no crea usuarios) o el PIN no coincide con el de ningún usuario activo | Cargar un usuario con `npm run usuario:sql` (ver [Alta de usuarios](#alta-de-usuarios)). |
 | `429` al ingresar el PIN | 8 PIN incorrectos en 10 minutos desde el mismo origen | Esperar el tiempo que indica el mensaje o reiniciar el backend (el contador está en memoria) |
 | `403` en una acción que antes andaba | El rol del usuario no tiene ese permiso | Revisar `rol_permiso` (ver la tabla de la regla 9) |
 | `npm run build`/`tsc` falla con `Invalid value for '--ignoreDeprecations'` | `tsconfig.json` tiene `"ignoreDeprecations": "6.0"` pero el TypeScript instalado es 5.9 (`npm run dev` no se ve afectado: `tsx` no chequea tipos) | Pendiente de decidir: subir TypeScript a 6 o cambiar el valor a `"5.0"` |

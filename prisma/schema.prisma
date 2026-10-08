@@ -275,7 +275,7 @@ model PlanoPedidoAnotacion {
 
 // Usuarios, roles y permisos — feature/usuarios-roles-permisos. Tablas aparte, no
 // tocan ninguna de las existentes. Cada usuario tiene un PIN numérico (único) que
-// se guarda como HMAC-SHA256 con PIN_PEPPER (nunca en texto plano). Los usuarios
+// se guarda en texto plano (decisión del usuario, app interna). Los usuarios
 // y roles se administran directo en la base (no hay interfaz); `rol_permiso` es la
 // tabla de funcionalidades que tiene cada rol. Un usuario no se borra: se pone
 // activo = false.
@@ -314,7 +314,7 @@ model RolPermiso {
 model Usuario {
   id             String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   nombre         String    @unique
-  pin_hash       String    @unique
+  pin            String    @unique
   rol_id         String    @db.Uuid
   activo         Boolean   @default(true)
   creado_en      DateTime  @default(now())

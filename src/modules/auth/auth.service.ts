@@ -1,6 +1,5 @@
 import { prisma } from "../../config/prisma";
 import { AppError } from "../../utils/AppError";
-import { hashPin } from "./pin";
 import { crearToken, SESION_SEGUNDOS } from "./sesion";
 
 // Límite de intentos fallidos por IP (en memoria, se reinicia con el servidor):
@@ -33,7 +32,7 @@ function registrarFallo(ip: string) {
 export async function loginPorPin(pin: string, ip: string) {
   chequearBloqueo(ip);
   const u = await prisma.usuario.findUnique({
-    where: { pin_hash: hashPin(pin) },
+    where: { pin },
     select: { id: true, nombre: true, activo: true, rol: { select: { nombre: true } } },
   });
   if (!u || !u.activo) {
