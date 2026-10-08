@@ -1,4 +1,6 @@
 import { Router } from "express";
+import { requierePermiso } from "../../modules/auth/auth.middleware";
+import { PERMISOS } from "../../modules/auth/permisos";
 import { validateBody } from "../../middlewares/validateBody";
 import { CreateOrdenSchema } from "./schemas/create-orden.schema";
 import { createOrdenController } from "./controllers/create-orden.controller";
@@ -10,10 +12,10 @@ import { eliminarOrdenController } from "./controllers/orden-estado.controller";
 
 export const ordenesRouter = Router();
 
-ordenesRouter.get("/", listOrdenesController);
-ordenesRouter.post("/", validateBody(CreateOrdenSchema), createOrdenController);
-ordenesRouter.get("/:id", getOrdenController);
-ordenesRouter.get("/:id/pedidos", listPedidosDeOrdenController);
-ordenesRouter.patch("/:id/archivar", archivarOrdenController);
-ordenesRouter.patch("/:id/desarchivar", desarchivarOrdenController);
-ordenesRouter.delete("/:id", eliminarOrdenController);
+ordenesRouter.get("/", requierePermiso(PERMISOS.PRODUCCION_VER), listOrdenesController);
+ordenesRouter.post("/", requierePermiso(PERMISOS.ORDENES_GESTIONAR), validateBody(CreateOrdenSchema), createOrdenController);
+ordenesRouter.get("/:id", requierePermiso(PERMISOS.PRODUCCION_VER), getOrdenController);
+ordenesRouter.get("/:id/pedidos", requierePermiso(PERMISOS.PRODUCCION_VER), listPedidosDeOrdenController);
+ordenesRouter.patch("/:id/archivar", requierePermiso(PERMISOS.ORDENES_GESTIONAR), archivarOrdenController);
+ordenesRouter.patch("/:id/desarchivar", requierePermiso(PERMISOS.ORDENES_GESTIONAR), desarchivarOrdenController);
+ordenesRouter.delete("/:id", requierePermiso(PERMISOS.ORDENES_GESTIONAR), eliminarOrdenController);

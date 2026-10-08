@@ -23,6 +23,10 @@ const envSchema = z.object({
   TEOWIN_DB_PASSWORD: optionalString(),
   TEOWIN_DB_ENCRYPT: z.coerce.boolean().default(true),
   TEOWIN_DB_TRUST_SERVER_CERTIFICATE: z.coerce.boolean().default(true),
+  // Autenticación por PIN (diseño.md §12). SESSION_SECRET firma la sesión: cambiarla solo
+  // cierra las sesiones abiertas.
+  SESSION_SECRET: z.string().min(16, "SESSION_SECRET debe tener al menos 16 caracteres."),
+  SESSION_HORAS: z.coerce.number().positive().default(12),
 });
 
 export const env = envSchema.parse(process.env);

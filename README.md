@@ -1,6 +1,6 @@
 # Backend — Seguimiento de placares
 
-API que sincroniza información de piezas de placares desde **TeoWin** (el ERP de la fábrica, base SQL Server) hacia una base propia (PostgreSQL), y expone los endpoints que usa el [frontend](../frontend/README.md) para mostrar órdenes/pedidos/módulos/piezas y registrar el escaneo de piezas cortadas. Además guarda la **documentación digital** de órdenes y pedidos (hojas de corte, nota de pedido, remisión, listados, planos) con las **anotaciones** que se le hacen encima.
+API que sincroniza información de piezas de placares desde **TeoWin** (el ERP de la fábrica, base SQL Server) hacia una base propia (PostgreSQL), y expone los endpoints que usa el [frontend](../frontend/README.md) para mostrar órdenes/pedidos/módulos/piezas y registrar el escaneo de piezas cortadas. Además guarda la **documentación digital** de órdenes y pedidos (hojas de corte, nota de pedido, remisión, listados, planos) con las **anotaciones** que se le hacen encima. El acceso es por **PIN de usuario** y cada **rol** tiene permisos distintos ([regla 9](#9-usuarios-roles-y-permisos)).
 
 > Si nunca tocaste este proyecto, empezá por **"Cómo levantarlo"** más abajo. El resto del documento es referencia.
 
@@ -86,7 +86,10 @@ app/backend/
 │       ├── hojas-corte/        # PDF de hojas de corte por orden + sus anotaciones (schemas/anotacion.schema.ts es el contrato compartido)
 │       ├── documentos-pedido/  # PDF de documentación por pedido (nota de pedido, remisión, escandallo, herrajes, accesorios) + anotaciones
 │       ├── planos-pedido/      # Planos por pedido (imagen JPG/PNG/WEBP o PDF), módulo opcional + anotaciones
+│       ├── auth/                # Login por PIN, sesión (token firmado), middlewares autenticar / requierePermiso y claves de permiso
 │       └── sync/                # Las queries de solo-lectura contra TeoWin + agrupar-despiece.ts (cuántas piezas físicas es cada fila)
+├── scripts/
+│   └── usuario-sql.ts          # Genera el INSERT para dar de alta un usuario (npm run usuario:sql)
 └── .env / .env.example
 ```
 
@@ -124,6 +127,8 @@ Copiá `.env.example` a `.env` y completá los valores. Nunca se sube `.env` al 
 | `TEOWIN_DB_PASSWORD` | Contraseña de ese usuario | — |
 | `TEOWIN_DB_ENCRYPT` | Si la conexión requiere cifrado (mirar la config de conexión en SSMS) | `true` |
 | `TEOWIN_DB_TRUST_SERVER_CERTIFICATE` | Aceptar el certificado del servidor sin validarlo contra una CA pública | `true` |
+| `SESSION_SECRET` | **Obligatoria.** Clave que firma las sesiones. Mínimo 16 caracteres, aleatoria. Si se cambia, solo se cierran las sesiones abiertas | `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"` |
+| `SESSION_HORAS` | Duración de la sesión en horas (por defecto `12`) | `12` |
 
 **Importante sobre el usuario de TeoWin**: tiene que tener permisos acotados a `SELECT` únicamente (nunca `db_datawriter`, nunca `sa`). Ver [TeoWin: restricción de solo lectura](#teowin-restricción-de-solo-lectura) más abajo — hay un script listo para crear ese usuario.
 
@@ -144,6 +149,8 @@ npm run dev                 # levanta el servidor en modo desarrollo (reinicia s
 
 Vas a ver `Backend escuchando en puerto 4000`. Dejá esa terminal abierta mientras uses la app.
 
+> **Antes de usar la app tenés que cargar al menos un usuario**: la migración de usuarios crea los roles y permisos pero **ningún usuario**, y sin sesión todo responde `401`. Ver [Alta de usuarios](#alta-de-usuarios).
+
 > Las migraciones de la documentación digital (`hoja_corte`, `documento_pedido`, `plano_pedido` y sus anotaciones) solo **agregan** tablas. Para revertir una, ejecutá su `down.sql` (en `prisma/migrations/<nombre>/`) y borrá su fila de `_prisma_migrations`.
 
 Otros comandos útiles:
@@ -154,12 +161,13 @@ Otros comandos útiles:
 | `npm start` | Corre la versión ya compilada (`npm run build` primero) |
 | `npx prisma studio` | Abre una interfaz web para mirar/editar los datos de la base propia a mano |
 | `npx prisma migrate dev --name algo` | Crea y aplica una migración nueva después de cambiar `schema.prisma` |
+| `npm run usuario:sql -- "<nombre>" <rol> <pin>` | Imprime el `INSERT` para dar de alta un usuario (ver [Alta de usuarios](#alta-de-usuarios)) |
 
 ---
 
 ## Modelo de datos
 
-La jerarquía de producción son cinco tablas (más las seis de [documentación digital](#documentación-digital-tablas-aparte), que cuelgan de orden / pedido / módulo). Todas en la base propia. Reflejan la jerarquía real: una **orden de fabricación** agrupa varios **pedidos**, cada pedido tiene varios **módulos** (muebles), cada módulo tiene varios **tipos de pieza**, y cada tipo de pieza puede representar varias **piezas físicas** (cuando hay que cortar más de una unidad igual).
+La jerarquía de producción son cinco tablas (más las seis de [documentación digital](#documentación-digital-tablas-aparte), que cuelgan de orden / pedido / módulo, y las cuatro de [usuarios, roles y permisos](#usuarios-roles-y-permisos-tablas-aparte)). Todas en la base propia. Reflejan la jerarquía real: una **orden de fabricación** agrupa varios **pedidos**, cada pedido tiene varios **módulos** (muebles), cada módulo tiene varios **tipos de pieza**, y cada tipo de pieza puede representar varias **piezas físicas** (cuando hay que cortar más de una unidad igual).
 
 ```
 Orden ──┬── Pedido ──┬── Modulo ──┬── DespieceTipo ──┬── PiezaFisica
@@ -198,6 +206,19 @@ Seis tablas más, agregadas por migraciones **solo aditivas** (no modifican ning
 | `hoja_corte_anotacion`, `documento_pedido_anotacion`, `plano_pedido_anotacion` | cada archivo | Anotaciones: `tipo` (`TEXTO` o `DIBUJO`, enum `AnotacionTipo`), `pagina` (nulo = nota de todo el documento) y `datos` (JSON, ver regla 8) |
 
 Campos comunes: `id` (UUID), `nombre`, `nombre_archivo`, `tamano`, `contenido` (`bytea`), `creado_en`, `eliminado_en` (borrado lógico: nada se borra físicamente).
+
+### Usuarios, roles y permisos (tablas aparte)
+
+Cuatro tablas más, también por migración **solo aditiva** (`20261008120000_usuarios_roles_permisos`, con `down.sql`). Se administran **directo en la base**; no hay pantalla.
+
+| Tabla | Campos | Para qué |
+|---|---|---|
+| `rol` | `id`, `nombre` (único), `descripcion` | Los roles: `admin`, `tecnica`, `fabrica`, `gerencia` |
+| `permiso` | `clave` (PK), `descripcion` | Las funcionalidades (ej. `piezas.marcar`) |
+| `rol_permiso` | `rol_id`, `permiso_clave` (PK compuesta) | **Qué funcionalidades tiene cada rol** |
+| `usuario` | `id`, `nombre` (único), `pin` (único, texto plano), `rol_id`, `activo`, `creado_en`, `ultimo_acceso` | Un usuario = una persona o una estación de trabajo |
+
+Un usuario no se borra: se le pone `activo = false`. Detalle de qué permite cada rol en la [regla 9](#9-usuarios-roles-y-permisos).
 
 ### Estados (el campo `estado` de cada tabla)
 
@@ -303,7 +324,53 @@ Antes había botones y endpoints manuales para finalizar módulos y pedidos y pa
 - **Borrado lógico**: eliminar un documento o una anotación pone `eliminado_en`; la fila y el archivo siguen en la tabla (se puede purgar a mano con SQL pasado un tiempo).
 - **Orden o pedido eliminado**: sus documentos no se tocan en cascada, pero **dejan de ser accesibles** (todas las rutas responden `404`), porque cada consulta verifica que el pedido y la orden sigan vigentes.
 - **Los listados nunca traen `contenido`** (son MB por fila); el archivo se pide aparte por `/archivo`.
-- **Sin autor ni permisos**: la app todavía no tiene usuarios; cualquiera con acceso a la red puede cargar, anotar y borrar.
+- **Permisos**: subir y eliminar documentos exige `documentacion.gestionar`; crear anotaciones, `documentacion.anotar`; borrarlas, `documentacion.anotaciones.eliminar` (regla 9). **No se registra quién** subió, anotó o borró.
+
+### 9. Usuarios, roles y permisos
+
+Todo `/api/*` exige sesión salvo `GET /api/health` y `POST /api/auth/login`. Cada ruta, además, declara el permiso que necesita (`requierePermiso(PERMISOS.…)` en su router).
+
+- **Login**: `POST /api/auth/login` con `{ "pin": "123456" }`. El PIN identifica al usuario. Devuelve `{ token, expiraEnSegundos, usuario: { nombre, rol } }`; el frontend guarda el token en una cookie httpOnly y lo reenvía como `Authorization: Bearer <token>`.
+- **PIN**: numérico de 4 a 10 dígitos (se recomiendan 6) y único. **Se guarda en texto plano** en `usuario.pin` (decisión del usuario; cualquiera con lectura a la base ve los PIN, incluidos los backups).
+- **Sesión**: token firmado con `SESSION_SECRET`, dura `SESSION_HORAS`. Lleva solo el id de usuario y el vencimiento: **el rol y los permisos se leen de la base en cada pedido**, así que una baja (`activo = false`) o un cambio en `rol_permiso` rige de inmediato.
+- **Límite de intentos**: 8 PIN incorrectos en 10 minutos bloquean el login con `429`, por IP y en memoria (se reinicia con el servidor). Como el backend ve la IP del frontend, en la práctica es global.
+- **Errores**: `401` sin sesión válida (falta el token, venció, está alterado o el usuario está inactivo); `403` si el usuario no tiene el permiso.
+- `GET /api/auth/me` devuelve `{ nombre, rol, permisos[] }` (lo usa el frontend para decidir qué mostrar; el backend igual valida cada acción).
+
+**Permisos por rol** (la fuente es la tabla `rol_permiso`; esta tabla es la carga inicial de la migración):
+
+| Permiso | Qué habilita | admin | tecnica | fabrica | gerencia |
+|---|---|:-:|:-:|:-:|:-:|
+| `produccion.ver` | Ver órdenes, pedidos, módulos y piezas | ✔ | ✔ | ✔ | ✔ |
+| `piezas.marcar` | Escanear y marcar / deshacer piezas | ✔ | ✔ | ✔ | — |
+| `documentacion.ver` | Ver hojas de corte, documentos, planos y anotaciones | ✔ | ✔ | ✔ | ✔ |
+| `documentacion.anotar` | Crear anotaciones | ✔ | ✔ | ✔ | — |
+| `documentacion.anotaciones.eliminar` | Borrar anotaciones | ✔ | ✔ | — | — |
+| `documentacion.gestionar` | Subir y eliminar hojas de corte, documentos y planos | ✔ | ✔ | — | — |
+| `ordenes.gestionar` | Agregar, archivar y eliminar órdenes | ✔ | ✔ | — | — |
+| `usuarios.gestionar` | Alta y baja de usuarios (previsto; hoy se hace por base) | ✔ | ✔ | — | — |
+
+Los usuarios `fabrica` son las estaciones de trabajo (`cortadora1`, `rover1`, `armado1`, …); `gerencia` queda previsto para un panel de información futuro. Ver `diseño.md` §12 para los motivos.
+
+#### Alta de usuarios
+
+No hay pantalla: se da de alta desde la base. El script genera el `INSERT`:
+
+```powershell
+cd app\backend
+npm run usuario:sql -- "rover1" fabrica 123456
+```
+
+Imprime algo como `INSERT INTO usuario (nombre, pin, rol_id) VALUES ('rover1', '123456', (SELECT id FROM rol WHERE nombre = 'fabrica'));`, que se ejecuta en psql / pgAdmin / Prisma Studio. Roles válidos: `admin`, `tecnica`, `fabrica`, `gerencia`. Otras operaciones, directo en SQL:
+
+```sql
+UPDATE usuario SET activo = false WHERE nombre = 'rover1';              -- dar de baja (cierra su sesión de inmediato)
+UPDATE usuario SET rol_id = (SELECT id FROM rol WHERE nombre = 'tecnica') WHERE nombre = 'rover1';  -- cambiar de rol
+```
+
+Para cambiar el PIN de alguien: `UPDATE usuario SET pin = '654321' WHERE nombre = 'rover1';` (tiene que ser numérico y único). Para **agregar un permiso nuevo**: insertarlo en `permiso` y asignarlo en `rol_permiso` (también a `admin`: no tiene acceso implícito a todo); el código lo referencia con `requierePermiso`.
+
+> No guardes PIN en archivos del proyecto ni en el historial de git. Evitá pasar PIN reales en la línea de comandos de una máquina compartida (queda en el historial de la terminal).
 
 ---
 
@@ -320,6 +387,15 @@ Todas las respuestas tienen esta forma:
 - `error`: error nuestro/del servidor. Código HTTP 5xx.
 
 Base URL en desarrollo: `http://localhost:4000/api`
+
+**Autenticación**: todas las rutas salvo `GET /health` y `POST /auth/login` requieren `Authorization: Bearer <token>`. Sin sesión válida responden `401`; sin el permiso de la ruta, `403` (`"No tenés permiso para realizar esta acción."`). El permiso que exige cada ruta es el de la regla 9: lectura de producción (`produccion.ver`) en los `GET` de órdenes, pedidos y módulos; `ordenes.gestionar` en `POST`/`DELETE`/`archivar`/`desarchivar` de órdenes; `piezas.marcar` en las tres rutas de piezas; `documentacion.ver` en los `GET` de documentación y anotaciones; `documentacion.gestionar` en subir y eliminar archivos; `documentacion.anotar` en `POST` de anotaciones y `documentacion.anotaciones.eliminar` en su `DELETE`.
+
+### Autenticación
+
+| Método y ruta | Qué hace | Body / respuesta |
+|---|---|---|
+| `POST /auth/login` | Inicia sesión con el PIN (ruta pública) | body: `{ "pin": "123456" }` → `data`: `{ token, expiraEnSegundos, usuario: { nombre, rol } }`. Errores: `400` (PIN no numérico), `401` (PIN incorrecto o usuario inactivo), `429` (demasiados intentos) |
+| `GET /auth/me` | Quién es el usuario de la sesión y qué puede hacer | `data`: `{ nombre, rol, permisos: string[] }` |
 
 ### Salud del servidor
 
@@ -431,4 +507,8 @@ El script [`prisma/teowin-readonly-login.sql`](prisma/teowin-readonly-login.sql)
 | Un módulo muestra menos piezas que el escandallo de TeoWin | Familia de corte que no estaba en el filtro (caso real: los paneles `PZPP/PAN` del módulo 38 del pedido `26-02149`, 40 en vez de 42) o órdenes sincronizadas antes de la corrección | El filtro ahora sale de `tFamiliasListadosFabricacion` (listado `A02`, catálogo 4). Para órdenes ya cargadas hay que completarlas (solo agregando filas) o eliminarlas y volver a agregarlas — ver la regla 1 |
 | `prisma generate` falla con `EPERM: operation not permitted, rename ...query_engine-windows.dll.node` | El backend (`npm run dev`, `tsx watch`) está corriendo y tiene la DLL de Prisma abierta | Detené el backend, corré `npx prisma generate` y volvelo a levantar |
 | Subir un PDF o plano falla con `413` | Supera los 40 MB | Reducir el archivo; el límite está en `MAX_PDF_BYTES` / `MAX_PLANO_BYTES` |
+| El backend no arranca: `SESSION_SECRET debe tener al menos 16 caracteres` | Falta completar esa variable en `.env` (es obligatoria desde la feature de usuarios) | Generá un valor aleatorio largo (ver [Variables de entorno](#variables-de-entorno)) |
+| Toda la app responde `401` / pide PIN y no hay forma de entrar | No hay ningún usuario cargado (la migración no crea usuarios) o el PIN no coincide con el de ningún usuario activo | Cargar un usuario con `npm run usuario:sql` (ver [Alta de usuarios](#alta-de-usuarios)). |
+| `429` al ingresar el PIN | 8 PIN incorrectos en 10 minutos desde el mismo origen | Esperar el tiempo que indica el mensaje o reiniciar el backend (el contador está en memoria) |
+| `403` en una acción que antes andaba | El rol del usuario no tiene ese permiso | Revisar `rol_permiso` (ver la tabla de la regla 9) |
 | `npm run build`/`tsc` falla con `Invalid value for '--ignoreDeprecations'` | `tsconfig.json` tiene `"ignoreDeprecations": "6.0"` pero el TypeScript instalado es 5.9 (`npm run dev` no se ve afectado: `tsx` no chequea tipos) | Pendiente de decidir: subir TypeScript a 6 o cambiar el valor a `"5.0"` |
