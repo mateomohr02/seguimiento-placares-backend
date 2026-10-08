@@ -272,3 +272,56 @@ model PlanoPedidoAnotacion {
   @@index([plano_pedido_id])
   @@map("plano_pedido_anotacion")
 }
+
+// Usuarios, roles y permisos — feature/usuarios-roles-permisos. Tablas aparte, no
+// tocan ninguna de las existentes. Cada usuario tiene un PIN numérico (único) que
+// se guarda como HMAC-SHA256 con PIN_PEPPER (nunca en texto plano). Los usuarios
+// y roles se administran directo en la base (no hay interfaz); `rol_permiso` es la
+// tabla de funcionalidades que tiene cada rol. Un usuario no se borra: se pone
+// activo = false.
+model Rol {
+  id          String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  nombre      String  @unique
+  descripcion String?
+
+  usuarios Usuario[]
+  permisos RolPermiso[]
+
+  @@map("rol")
+}
+
+// `clave` es la identidad (ej. "piezas.marcar"): el código la referencia por nombre.
+model Permiso {
+  clave       String @id
+  descripcion String
+
+  roles RolPermiso[]
+
+  @@map("permiso")
+}
+
+model RolPermiso {
+  rol_id        String @db.Uuid
+  permiso_clave String
+
+  rol     Rol     @relation(fields: [rol_id], references: [id], onDelete: Cascade)
+  permiso Permiso @relation(fields: [permiso_clave], references: [clave], onDelete: Cascade)
+
+  @@id([rol_id, permiso_clave])
+  @@map("rol_permiso")
+}
+
+model Usuario {
+  id             String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  nombre         String    @unique
+  pin_hash       String    @unique
+  rol_id         String    @db.Uuid
+  activo         Boolean   @default(true)
+  creado_en      DateTime  @default(now())
+  ultimo_acceso  DateTime?
+
+  rol Rol @relation(fields: [rol_id], references: [id])
+
+  @@index([rol_id])
+  @@map("usuario")
+}

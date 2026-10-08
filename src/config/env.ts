@@ -23,6 +23,13 @@ const envSchema = z.object({
   TEOWIN_DB_PASSWORD: optionalString(),
   TEOWIN_DB_ENCRYPT: z.coerce.boolean().default(true),
   TEOWIN_DB_TRUST_SERVER_CERTIFICATE: z.coerce.boolean().default(true),
+  // Autenticación por PIN (diseño.md §12). Obligatorias: sin ellas no se puede
+  // verificar ningún PIN. PIN_PEPPER es la clave del HMAC con que se guardan los
+  // PIN: si se cambia, hay que volver a generar el pin_hash de todos los usuarios.
+  // SESSION_SECRET firma la sesión: cambiarla solo cierra las sesiones abiertas.
+  PIN_PEPPER: z.string().min(16, "PIN_PEPPER debe tener al menos 16 caracteres."),
+  SESSION_SECRET: z.string().min(16, "SESSION_SECRET debe tener al menos 16 caracteres."),
+  SESSION_HORAS: z.coerce.number().positive().default(12),
 });
 
 export const env = envSchema.parse(process.env);
