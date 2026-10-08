@@ -1,6 +1,6 @@
 # Backend — Seguimiento de placares
 
-API que sincroniza información de piezas de placares desde **TeoWin** (el ERP de la fábrica, base SQL Server) hacia una base propia (PostgreSQL), y expone los endpoints que usa el [frontend](../frontend/README.md) para mostrar órdenes/pedidos/módulos/piezas y registrar el escaneo de piezas cortadas.
+API que sincroniza información de piezas de placares desde **TeoWin** (el ERP de la fábrica, base SQL Server) hacia una base propia (PostgreSQL), y expone los endpoints que usa el [frontend](../frontend/README.md) para mostrar órdenes/pedidos/módulos/piezas y registrar el escaneo de piezas cortadas. Además guarda la **documentación digital** de órdenes y pedidos (hojas de corte, nota de pedido, remisión, listados, planos) con las **anotaciones** que se le hacen encima.
 
 > Si nunca tocaste este proyecto, empezá por **"Cómo levantarlo"** más abajo. El resto del documento es referencia.
 
@@ -80,9 +80,12 @@ app/backend/
 │   ├── utils/                  # AppError, catchAsync, sendResponse, parseIdParam
 │   └── modules/                # Un módulo por concepto de negocio
 │       ├── ordenes/            # Listar, sincronizar y consultar órdenes de fabricación
-│       ├── pedidos/            # Consultar pedidos, marcar "finalizado"
-│       ├── modulos/            # Consultar módulos (muebles), marcar "finalizado"
+│       ├── pedidos/            # Consultar pedidos (solo lectura: su estado se deriva de los módulos)
+│       ├── modulos/            # Consultar módulos (muebles) (solo lectura: su estado se deriva de las piezas)
 │       ├── piezas/             # Escanear, confirmar manualmente, listar piezas
+│       ├── hojas-corte/        # PDF de hojas de corte por orden + sus anotaciones (schemas/anotacion.schema.ts es el contrato compartido)
+│       ├── documentos-pedido/  # PDF de documentación por pedido (nota de pedido, remisión, escandallo, herrajes, accesorios) + anotaciones
+│       ├── planos-pedido/      # Planos por pedido (imagen JPG/PNG/WEBP o PDF), módulo opcional + anotaciones
 │       └── sync/                # Las queries de solo-lectura contra TeoWin + agrupar-despiece.ts (cuántas piezas físicas es cada fila)
 └── .env / .env.example
 ```
@@ -98,6 +101,8 @@ Cada módulo de negocio (`ordenes`, `pedidos`, `modulos`, `piezas`) sigue siempr
 ├── dtos/                     # La forma exacta de los datos que salen hacia el cliente
 └── mappers/                  # Convierten un registro de la base a un DTO
 ```
+
+Los módulos de documentación digital (`hojas-corte`, `documentos-pedido`, `planos-pedido`) siguen la misma idea pero más simples: `controllers/`, `services/` y a veces `schemas/`; arman el DTO dentro del service (`toDTO`) en vez de tener `mappers/` y `dtos/` separados, y **nunca** seleccionan el campo `contenido` salvo al servir el archivo.
 
 Esto significa: un controller **nunca** habla directo con la base de datos, y el modelo de la base **nunca** sale tal cual hacia el cliente — siempre pasa por un DTO. Sirve para poder cambiar la base sin romper el contrato con el frontend.
 
@@ -139,6 +144,8 @@ npm run dev                 # levanta el servidor en modo desarrollo (reinicia s
 
 Vas a ver `Backend escuchando en puerto 4000`. Dejá esa terminal abierta mientras uses la app.
 
+> Las migraciones de la documentación digital (`hoja_corte`, `documento_pedido`, `plano_pedido` y sus anotaciones) solo **agregan** tablas. Para revertir una, ejecutá su `down.sql` (en `prisma/migrations/<nombre>/`) y borrá su fila de `_prisma_migrations`.
+
 Otros comandos útiles:
 
 | Comando | Qué hace |
@@ -152,7 +159,7 @@ Otros comandos útiles:
 
 ## Modelo de datos
 
-Cinco tablas, todas en la base propia. Reflejan la jerarquía real: una **orden de fabricación** agrupa varios **pedidos**, cada pedido tiene varios **módulos** (muebles), cada módulo tiene varios **tipos de pieza**, y cada tipo de pieza puede representar varias **piezas físicas** (cuando hay que cortar más de una unidad igual).
+La jerarquía de producción son cinco tablas (más las seis de [documentación digital](#documentación-digital-tablas-aparte), que cuelgan de orden / pedido / módulo). Todas en la base propia. Reflejan la jerarquía real: una **orden de fabricación** agrupa varios **pedidos**, cada pedido tiene varios **módulos** (muebles), cada módulo tiene varios **tipos de pieza**, y cada tipo de pieza puede representar varias **piezas físicas** (cuando hay que cortar más de una unidad igual).
 
 ```
 Orden ──┬── Pedido ──┬── Modulo ──┬── DespieceTipo ──┬── PiezaFisica
@@ -178,6 +185,19 @@ Si el despiece dice "3 estantes iguales", eso es **un** `DespieceTipo` (familia/
 | `pieza_fisica` | `despiece_tipo_id`, `idUnico` (nulo si la pieza no tiene etiqueta), `escaneado_en` | Junto con la orden |
 
 Todos los campos que vienen directo de TeoWin (`idEscena`, `idCatalogo`, `familia`, `articulo`, `color`, `medida1/2/3`, `codigoOrdenFabricacion`, `idUnico`, etc.) mantienen el mismo nombre que tienen allá, para que sea fácil rastrear de dónde sale cada dato. Los campos que son solo nuestros usan `snake_case` (`creado_en`, `codigo_pedido`, etc.).
+
+### Documentación digital (tablas aparte)
+
+Seis tablas más, agregadas por migraciones **solo aditivas** (no modifican ninguna de las anteriores; cada migración trae un `down.sql` para revertirla a mano). Guardan los archivos **dentro de Postgres** (`bytea`), así el `pg_dump` es el único backup.
+
+| Tabla | De qué cuelga | Qué guarda |
+|---|---|---|
+| `hoja_corte` | `orden` | PDF de hoja de corte. Una orden puede tener varias (ej. MDP y MDF), cada una con su `nombre` |
+| `documento_pedido` | `pedido` | PDF con `tipo` (enum `DocumentoPedidoTipo`): `NOTA_PEDIDO` y `DETALLE_REMISION` (obligatorios en todo pedido) y los adicionales `ESCANDALLO_PLACARES`, `HERRAJES_PLACARES`, `ACCESORIOS_PLACARES`, `HERRAJES_COCINAS`, `ACCESORIOS_COCINAS` (herrajes y accesorios salen de reportes distintos según la línea). Puede haber varios del mismo tipo |
+| `plano_pedido` | `pedido` (+ `modulo`, opcional) | Plano en imagen (`image/jpeg`, `image/png`, `image/webp`) o PDF; guarda su `mime` |
+| `hoja_corte_anotacion`, `documento_pedido_anotacion`, `plano_pedido_anotacion` | cada archivo | Anotaciones: `tipo` (`TEXTO` o `DIBUJO`, enum `AnotacionTipo`), `pagina` (nulo = nota de todo el documento) y `datos` (JSON, ver regla 8) |
+
+Campos comunes: `id` (UUID), `nombre`, `nombre_archivo`, `tamano`, `contenido` (`bytea`), `creado_en`, `eliminado_en` (borrado lógico: nada se borra físicamente).
 
 ### Estados (el campo `estado` de cada tabla)
 
@@ -275,6 +295,16 @@ Antes había botones y endpoints manuales para finalizar módulos y pedidos y pa
 
 `PATCH /ordenes/:id/archivar` y `/desarchivar` solo setean/limpian `archivada_en`. No cambia el estado ni bloquea el escaneo. `GET /ordenes` devuelve solo las no archivadas; con `?archivadas=true`, solo las archivadas.
 
+### 8. Documentación digital y anotaciones
+
+- **El archivo original nunca se modifica.** Las correcciones (dibujos, textos, aclaraciones) son filas de anotación que el visor dibuja encima.
+- **Coordenadas normalizadas**: en `datos`, `x` e `y` van de `0` a `1` sobre el ancho y el alto de la página, y `grosor` / `tamano` son fracción del ancho. Así se ven igual con cualquier zoom o dispositivo. Un `DIBUJO` lleva `{ puntos: [[x,y],...] (máx. 3000), grosor, color (#rrggbb), resaltador }`; un `TEXTO` de página, `{ x, y, texto (máx. 500), tamano, color }`; una **nota del documento** (`pagina: null`), solo `{ texto }`. La validación está en `hojas-corte/schemas/anotacion.schema.ts` y la comparten los tres tipos de documento.
+- **Validación de archivos**: máximo 40 MB. Los PDF se aceptan si contienen la firma `%PDF-`; los planos se validan por la **firma real** del archivo (JPEG, PNG, WEBP o PDF), no por lo que declara el cliente. Un módulo asociado a un plano tiene que ser del mismo pedido.
+- **Borrado lógico**: eliminar un documento o una anotación pone `eliminado_en`; la fila y el archivo siguen en la tabla (se puede purgar a mano con SQL pasado un tiempo).
+- **Orden o pedido eliminado**: sus documentos no se tocan en cascada, pero **dejan de ser accesibles** (todas las rutas responden `404`), porque cada consulta verifica que el pedido y la orden sigan vigentes.
+- **Los listados nunca traen `contenido`** (son MB por fila); el archivo se pide aparte por `/archivo`.
+- **Sin autor ni permisos**: la app todavía no tiene usuarios; cualquiera con acceso a la red puede cargar, anotar y borrar.
+
 ---
 
 ## Documentación de la API
@@ -320,6 +350,38 @@ Base URL en desarrollo: `http://localhost:4000/api`
 |---|---|---|
 | `GET /modulos/:id` | Detalle de un módulo | `data`: los campos del módulo + `pedido: { id, codigo_pedido, nombreComercial }` + `orden: { id, numeroOrdenCustom }` |
 | `GET /modulos/:id/piezas` | Piezas físicas de ese módulo | `data`: array de `{ id, idUnico, familia, articulo, color, descripcion, medida1, medida2, estado, escaneado_en }` |
+
+### Hojas de corte (por orden)
+
+| Método y ruta | Qué hace | Body / respuesta |
+|---|---|---|
+| `GET /ordenes/:ordenId/hojas-corte` | Lista las hojas de la orden (sin el archivo) | `data`: array de `{ id, orden_id, nombre, nombre_archivo, tamano, creado_en }` |
+| `POST /ordenes/:ordenId/hojas-corte?nombre=...&archivo=...` | Sube una hoja. **Body: el PDF crudo** con `Content-Type: application/pdf` (no JSON) | `data`: la hoja creada. `400` (no es PDF / falta nombre), `404` (orden), `413` (más de 40 MB), `415` (no es `application/pdf`) |
+| `GET /hojas-corte/:id/archivo` | Devuelve el PDF (`inline`) | binario `application/pdf` |
+| `DELETE /hojas-corte/:id` | Borrado lógico | `data: null` |
+| `GET /hojas-corte/:id/anotaciones` | Anotaciones vigentes de la hoja | `data`: array de `{ id, hoja_corte_id, pagina, tipo, datos, creado_en }` |
+| `POST /hojas-corte/:id/anotaciones` | Crea una anotación (regla 8) | body JSON: `{ tipo, pagina, datos }` → `data`: la anotación. `400` si no valida |
+| `DELETE /hojas-corte/:id/anotaciones/:anotacionId` | Borrado lógico de una anotación | `data: null` |
+
+### Documentos de un pedido
+
+Mismo esquema que las hojas de corte, colgando del pedido.
+
+| Método y ruta | Qué hace | Body / respuesta |
+|---|---|---|
+| `GET /pedidos/:pedidoId/documentos` | Lista los documentos del pedido (sin el archivo) | `data`: array de `{ id, pedido_id, tipo, nombre, nombre_archivo, tamano, creado_en }` |
+| `POST /pedidos/:pedidoId/documentos?tipo=...&archivo=...&nombre=...` | Sube un PDF. `tipo` es obligatorio (uno de `DocumentoPedidoTipo`); `nombre` es opcional (por defecto, la etiqueta del tipo). Body: PDF crudo, `Content-Type: application/pdf` | `data`: el documento creado |
+| `GET /documentos-pedido/:id/archivo` · `DELETE /documentos-pedido/:id` | Descargar / borrado lógico | igual que en hojas de corte |
+| `GET`/`POST /documentos-pedido/:id/anotaciones` · `DELETE /documentos-pedido/:id/anotaciones/:anotacionId` | Anotaciones del documento | mismo contrato (campo `documento_pedido_id`) |
+
+### Planos de un pedido
+
+| Método y ruta | Qué hace | Body / respuesta |
+|---|---|---|
+| `GET /pedidos/:pedidoId/planos` | Lista los planos (sin el archivo) | `data`: array de `{ id, pedido_id, nombre, nombre_archivo, mime, tamano, creado_en, modulo: { id, idEscena, descripcion } \| null }` |
+| `POST /pedidos/:pedidoId/planos?nombre=...&archivo=...&moduloId=...` | Sube un plano. `nombre` obligatorio; `moduloId` opcional (UUID de un módulo **de ese pedido**). Body: el archivo crudo con su `Content-Type` (`image/jpeg`, `image/png`, `image/webp` o `application/pdf`) | `data`: el plano. `400` (la firma no coincide / módulo de otro pedido), `415` (formato no soportado) |
+| `GET /planos-pedido/:id/archivo` · `DELETE /planos-pedido/:id` | Descargar (con su `Content-Type`) / borrado lógico | |
+| `GET`/`POST /planos-pedido/:id/anotaciones` · `DELETE /planos-pedido/:id/anotaciones/:anotacionId` | Anotaciones del plano (una imagen es un documento de una sola página) | mismo contrato (campo `plano_pedido_id`) |
 
 ### Piezas
 
@@ -367,4 +429,6 @@ El script [`prisma/teowin-readonly-login.sql`](prisma/teowin-readonly-login.sql)
 | `409 Conflict` ("ya existe un registro activo") al sincronizar una orden que **sí** aparece en el listado de la app | Ya existe una fila activa con ese `codigoOrdenFabricacion` en la base propia | Es el comportamiento esperado — para recargarla hay que eliminarla primero (botón "Eliminar" del listado) |
 | `409 Conflict` al sincronizar una orden que **no** aparece en ningún lado de la app (nunca se sincronizó) | `tArticuloDescripciones` puede tener más de una fila para el mismo familia/articulo/idioma con distinto `idCatalogo` — sin filtrar por `idCatalogo` en el join de descripción (`src/modules/sync/teowin-orden.queries.ts`), se duplican filas y dos piezas con el mismo `idUnico` terminan en el mismo `INSERT`, lo que dispara el índice único de la sección 8.3 con un mensaje engañoso ("ya existe") aunque la orden nunca se llegó a crear | Ya corregido (el join ahora exige `ad.idCatalogo = d.idCatalogo`/`= padre.idCatalogo`) — si vuelve a aparecer con otra orden, correr la query de `fetchOrdenDespiece` a mano y comparar el conteo de filas con/sin ese join |
 | Un módulo muestra menos piezas que el escandallo de TeoWin | Familia de corte que no estaba en el filtro (caso real: los paneles `PZPP/PAN` del módulo 38 del pedido `26-02149`, 40 en vez de 42) o órdenes sincronizadas antes de la corrección | El filtro ahora sale de `tFamiliasListadosFabricacion` (listado `A02`, catálogo 4). Para órdenes ya cargadas hay que completarlas (solo agregando filas) o eliminarlas y volver a agregarlas — ver la regla 1 |
+| `prisma generate` falla con `EPERM: operation not permitted, rename ...query_engine-windows.dll.node` | El backend (`npm run dev`, `tsx watch`) está corriendo y tiene la DLL de Prisma abierta | Detené el backend, corré `npx prisma generate` y volvelo a levantar |
+| Subir un PDF o plano falla con `413` | Supera los 40 MB | Reducir el archivo; el límite está en `MAX_PDF_BYTES` / `MAX_PLANO_BYTES` |
 | `npm run build`/`tsc` falla con `Invalid value for '--ignoreDeprecations'` | `tsconfig.json` tiene `"ignoreDeprecations": "6.0"` pero el TypeScript instalado es 5.9 (`npm run dev` no se ve afectado: `tsx` no chequea tipos) | Pendiente de decidir: subir TypeScript a 6 o cambiar el valor a `"5.0"` |
