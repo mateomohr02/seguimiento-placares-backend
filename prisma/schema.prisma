@@ -77,8 +77,10 @@ model Pedido {
   creado_en      DateTime     @default(now())
   eliminado_en   DateTime?
 
-  orden   Orden    @relation(fields: [orden_id], references: [id])
-  modulos Modulo[]
+  orden      Orden             @relation(fields: [orden_id], references: [id])
+  modulos    Modulo[]
+  documentos DocumentoPedido[]
+  planos     PlanoPedido[]
 
   @@map("pedido")
 }
@@ -94,6 +96,7 @@ model Modulo {
 
   pedido         Pedido         @relation(fields: [pedido_id], references: [id])
   despieceTipos  DespieceTipo[]
+  planos         PlanoPedido[]
 
   @@map("modulo")
 }
@@ -178,4 +181,94 @@ model HojaCorteAnotacion {
 
   @@index([hoja_corte_id])
   @@map("hoja_corte_anotacion")
+}
+
+enum DocumentoPedidoTipo {
+  NOTA_PEDIDO
+  DETALLE_REMISION
+  ESCANDALLO_PLACARES
+  HERRAJES_PLACARES
+  ACCESORIOS_PLACARES
+  HERRAJES_COCINAS
+  ACCESORIOS_COCINAS
+}
+
+// Documentación de un pedido (PDF) — feature/documentacion-pedidos. Obligatorios
+// para todo pedido: NOTA_PEDIDO y DETALLE_REMISION; el resto depende del tipo de
+// modulación/modelos. Herrajes y accesorios son reportes distintos según la línea
+// (placares / cocinas), por eso son tipos separados. Mismo esquema que hoja_corte: PDF en bytea, borrado lógico,
+// el original nunca se modifica (las correcciones son anotaciones encima).
+model DocumentoPedido {
+  id             String              @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  pedido_id      String              @db.Uuid
+  tipo           DocumentoPedidoTipo
+  nombre         String
+  nombre_archivo String
+  tamano         Int
+  contenido      Bytes
+  creado_en      DateTime            @default(now())
+  eliminado_en   DateTime?
+
+  pedido      Pedido                     @relation(fields: [pedido_id], references: [id])
+  anotaciones DocumentoPedidoAnotacion[]
+
+  @@index([pedido_id])
+  @@map("documento_pedido")
+}
+
+// Mismo contrato que hoja_corte_anotacion (coordenadas normalizadas en `datos`).
+model DocumentoPedidoAnotacion {
+  id                  String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  documento_pedido_id String        @db.Uuid
+  pagina              Int?
+  tipo                AnotacionTipo
+  datos               Json
+  creado_en           DateTime      @default(now())
+  eliminado_en        DateTime?
+
+  documento DocumentoPedido @relation(fields: [documento_pedido_id], references: [id])
+
+  @@index([documento_pedido_id])
+  @@map("documento_pedido_anotacion")
+}
+
+// Planos de un pedido (imagen JPG/PNG/WEBP o PDF) — feature/documentacion-pedidos.
+// Pocos pedidos / módulos los llevan, pero cuando existen son críticos. Pueden
+// asociarse a un módulo del pedido (opcional). Mismo esquema que documento_pedido:
+// archivo en bytea, borrado lógico, el original nunca se modifica (las acotaciones
+// y aclaraciones son anotaciones encima).
+model PlanoPedido {
+  id             String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  pedido_id      String    @db.Uuid
+  modulo_id      String?   @db.Uuid
+  nombre         String
+  nombre_archivo String
+  mime           String
+  tamano         Int
+  contenido      Bytes
+  creado_en      DateTime  @default(now())
+  eliminado_en   DateTime?
+
+  pedido      Pedido                @relation(fields: [pedido_id], references: [id])
+  modulo      Modulo?               @relation(fields: [modulo_id], references: [id])
+  anotaciones PlanoPedidoAnotacion[]
+
+  @@index([pedido_id])
+  @@map("plano_pedido")
+}
+
+// Mismo contrato que hoja_corte_anotacion (coordenadas normalizadas en `datos`).
+model PlanoPedidoAnotacion {
+  id              String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  plano_pedido_id String        @db.Uuid
+  pagina          Int?
+  tipo            AnotacionTipo
+  datos           Json
+  creado_en       DateTime      @default(now())
+  eliminado_en    DateTime?
+
+  plano PlanoPedido @relation(fields: [plano_pedido_id], references: [id])
+
+  @@index([plano_pedido_id])
+  @@map("plano_pedido_anotacion")
 }
