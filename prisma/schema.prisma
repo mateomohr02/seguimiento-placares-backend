@@ -348,3 +348,19 @@ model EscenaPedido {
   @@index([pedido_id])
   @@map("escena_pedido")
 }
+
+// Texturas de los materiales de las escenas 3D (colores de fábrica y decoración) — se copian
+// una vez desde la carpeta de TeoWin (TEOWIN_3D_DIR) o se suben a mano, así el visor no depende de
+// ese disco. `clave` es el código del material en minúsculas y sin el prefijo <n> (ver
+// normalizarClave). Tabla aparte, aditiva.
+model Textura3D {
+  clave     String   @id
+  nombre    String
+  mime      String
+  tamano    Int
+  contenido Bytes
+  origen    String
+  creado_en DateTime @default(now())
+
+  @@map("textura_3d")
+}

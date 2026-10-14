@@ -4,10 +4,11 @@ import { evaluar, grupos, oculto, type Entorno } from "./expresion";
 // geometría liviana para el visor: cajas (tableros y extrusiones rectangulares),
 // caras de pared y el contorno del suelo. Respeta `nuncavis3d` e `invisibilidad(...)` (piezas
 // que TeoWin no dibuja según las medidas del mueble). No interpreta tube / malla ni
-// extrusiones no rectangulares (herrajes, ventanas) ni luces, cotas o texturas de pared; solo paneles y paredes.
+// extrusiones no rectangulares (herrajes, ventanas) ni luces o cotas. Detecta las piezas que se
+// mueven (cajones y hojas corredizas) para animarlas, y los materiales de paredes y piso.
 // Subir PARSER_VERSION cuando cambie la salida (el original se conserva en la
 // base, así se puede re-interpretar).
-export const PARSER_VERSION = 4;
+export const PARSER_VERSION = 6;
 
 export interface CajaEscena {
   /** idEscena del módulo al que pertenece (null = no asociada). */
@@ -22,18 +23,34 @@ export interface CajaEscena {
   r: number[];
   /** Tamaño local (L, H, P) en mm. */
   s: [number, number, number];
+  /** Índice en `animaciones` si la pieza se mueve con un cajón o una hoja corrediza. */
+  a?: number;
+}
+
+/** Grupo de piezas que se desplazan juntas: un cajón que se abre o una hoja corrediza. */
+export interface AnimacionEscena {
+  tipo: "cajon" | "puerta";
+  mod: number | null;
+  /** Dirección del desplazamiento (vector unitario, en el sistema de la escena). */
+  eje: [number, number, number];
+  /** Recorrido de apertura en mm. */
+  dist: number;
 }
 
 export interface ParedEscena {
   lado: "int" | "ext";
   /** 4 vértices del rectángulo (mm). */
   p: [number, number, number][];
+  /** Material decorativo de la cara (ej. papel pintado), si lo declara. */
+  m?: string;
 }
 
 export interface ModuloEscena {
   idEscena: number;
   nombre: string;
   familia: string;
+  /** Catálogo del mueble (4 = Placares, 3 = Cocinas): los códigos de material son de ese catálogo. */
+  catalogo: string;
   /** Ancho, alto y profundidad del mueble (use L/H/P). */
   dim: [number, number, number];
 }
@@ -44,6 +61,11 @@ export interface Escena3D {
   modulos: ModuloEscena[];
   cajas: CajaEscena[];
   paredes: ParedEscena[];
+  animaciones: AnimacionEscena[];
+  /** Material decorativo del piso (ej. parquet), si lo declara. */
+  materialSuelo: string | null;
+  /** Materiales usados como "catálogo/código" (cajas, paredes y piso), para buscar sus texturas. */
+  materiales: string[];
   /** Contorno del suelo en planta [x, z] (mm), tomado de las paredes interiores. */
   suelo: [number, number][];
   /** Expresiones/variables que no se pudieron resolver (diagnóstico). */
@@ -57,6 +79,8 @@ interface Primitiva {
   c: [number, number, number] | null;
   /** transp(0): la pieza está en el .3d pero TeoWin no la dibuja (volumen auxiliar). */
   invisible: boolean;
+  /** <MATERIAL> declarado en el CAD de la propia línea (paredes). */
+  materialCad: string | null;
 }
 
 class Nodo {
@@ -77,6 +101,14 @@ class Nodo {
   espesor: number | null = null;
   /** Condición de `invisibilidad(...)`, se evalúa con las medidas del mueble. */
   invisibilidad: string | null = null;
+  /** Marca `seabre`: cajón que se desliza hacia el frente. */
+  seAbre = false;
+  /** Marca `corredera`: hoja de puerta corrediza. */
+  corredera = false;
+  /** porcenAperOpn: fracción del recorrido que se abre (0..1). */
+  porcen: number | null = null;
+  /** <MATERIAL> del CAD del nodo (piso). */
+  materialCad: string | null = null;
   prims: Primitiva[] = [];
   constructor(readonly nombre: string) {}
 }
@@ -107,6 +139,15 @@ function parsearArbol(texto: string): Nodo {
     }
     const o = pila[pila.length - 1];
     if (/nuncavis3d/.test(t) && !t.startsWith("eti")) o.nuncaVisible = true;
+    if (!t.startsWith("eti")) {
+      if (/\bseabre\b/.test(t)) o.seAbre = true;
+      if (/\bcorredera\b/.test(t)) o.corredera = true;
+      const po = /porcenAperOpn\(([\d.]+)\)/.exec(t);
+      if (po) o.porcen = Number(po[1]);
+    }
+    if (t.includes("<MATERIAL>") && o.materialCad === null) {
+      o.materialCad = /<MATERIAL>([^<]+)<\/MATERIAL>/.exec(t)?.[1]?.trim() || null;
+    }
     if ((m = /^use (\w+)\s*=(.*)$/.exec(t))) o.use[m[1]] = m[2].trim();
     else if ((m = /^param (\w+)\s*=\s*"(.*)"/.exec(t))) o.param[m[1]] = m[2];
     else if (t.startsWith("virtual(")) o.virtual = grupos(t).slice(0, 2);
@@ -131,6 +172,7 @@ function parsearArbol(texto: string): Nodo {
           m: mat,
           c: col ? [Number(col[1]), Number(col[2]), Number(col[3])] : null,
           invisible: /\btransp\(0(\.0+)?\)/.test(t),
+          materialCad: /<MATERIAL>([^<]+)<\/MATERIAL>/.exec(t)?.[1]?.trim() || null,
         });
       }
     }
@@ -166,6 +208,7 @@ function rotacion(ax: number, ay: number, az: number): Mat3 {
   return mul(rz, mul(ry, rx));
 }
 const r1 = (n: number) => Math.round(n * 10) / 10;
+const r4 = (n: number) => Math.round(n * 1e4) / 1e4;
 const rv = (v: Vec3): Vec3 => [r1(v[0]), r1(v[1]), r1(v[2])];
 
 // extrude(L,H,P)(offset)(punto)(punto)...: polígono plano extruido. Solo se soportan los
@@ -203,6 +246,16 @@ function cajaDeExtrusion(
   return [[off[0] + min[0], off[1] + min[1], off[2] + min[2]], dim];
 }
 
+// Fracción de apertura (porcenAperOpn) declarada en el propio nodo o en algún descendiente.
+function buscarPorcen(n: Nodo): number | null {
+  if (n.porcen !== null) return n.porcen;
+  for (const k of n.kids) {
+    const v = buscarPorcen(k);
+    if (v !== null) return v;
+  }
+  return null;
+}
+
 // Espesor por defecto cuando una medida depende de un material (GRCI="matci"): ese
 // valor vive en los scripts del catálogo, no en el .3d.
 const ESPESOR_DEFECTO = 18;
@@ -220,6 +273,9 @@ export function interpretarEscena3D(texto: string): Escena3D {
     modulos: [],
     cajas: [],
     paredes: [],
+    animaciones: [],
+    materialSuelo: null,
+    materiales: [],
     suelo: [],
     sinResolver: [],
   };
@@ -242,7 +298,15 @@ export function interpretarEscena3D(texto: string): Escena3D {
   // su valor real está en el matTablero de cada pieza, no en un parámetro.
   const espesorVars = new Set<string>(["mymat"]);
 
-  const caminar = (n: Nodo, envPadre: Entorno, M: Mat3, T: Vec3, idEscena: number | null, enModulo: boolean) => {
+  const caminar = (
+    n: Nodo,
+    envPadre: Entorno,
+    M: Mat3,
+    T: Vec3,
+    idEscena: number | null,
+    enModulo: boolean,
+    animPadre: number | null,
+  ) => {
     if (NODOS_IGNORADOS.has(n.nombre) || n.nuncaVisible) return;
     const env: Entorno = { ...envPadre };
     for (const [k, v] of Object.entries(n.param)) {
@@ -282,6 +346,23 @@ export function interpretarEscena3D(texto: string): Escena3D {
     const T2: Vec3 = [T[0] + d0[0], T[1] + d0[1], T[2] + d0[2]];
     const id = n.idEscena ?? idEscena;
 
+    // Animación (solo muebles): un cajón (`seabre`) se desliza hacia el frente el porcenAperOpn de su
+    // profundidad; una hoja `corredera` más angosta que el mueble corre hacia el otro extremo.
+    let anim = animPadre;
+    if (enModulo) {
+      if (n.seAbre && env.P > 0) {
+        const e = apply(M, [0, 0, 1]);
+        out.animaciones.push({ tipo: "cajon", mod: id, eje: [r4(e[0]), r4(e[1]), r4(e[2])], dist: r1((n.porcen ?? 0.85) * env.P) });
+        anim = out.animaciones.length - 1;
+      } else if (n.corredera && envPadre.L !== undefined && env.L !== undefined && env.L < envPadre.L - 1) {
+        const sentido = pos[0] + env.L / 2 < envPadre.L / 2 ? 1 : -1;
+        const e = apply(M, [sentido, 0, 0]);
+        const dist = (buscarPorcen(n) ?? 0.85) * (envPadre.L - env.L);
+        out.animaciones.push({ tipo: "puerta", mod: id, eje: [r4(e[0]), r4(e[1]), r4(e[2])], dist: r1(dist) });
+        anim = out.animaciones.length - 1;
+      }
+    }
+
     for (const pr of n.prims) {
       if (pr.invisible) continue;
       if (pr.tipo === "faceset" || pr.tipo === "face") {
@@ -300,7 +381,7 @@ export function interpretarEscena3D(texto: string): Escena3D {
           return rv([T2[0] + d[0], T2[1] + d[1], T2[2] + d[2]]);
         }) as ParedEscena["p"];
         const lado = n.objeti === "PAI" ? "int" : "ext";
-        out.paredes.push({ lado, p });
+        out.paredes.push(lado === "int" && pr.materialCad ? { lado, p, m: pr.materialCad } : { lado, p });
         if (lado === "int") inicioParedes.push([p[0][0], p[0][2]]);
       } else if (enModulo) {
         let off: Vec3 | null;
@@ -326,10 +407,11 @@ export function interpretarEscena3D(texto: string): Escena3D {
           t: rv([T2[0] + o[0], T2[1] + o[1], T2[2] + o[2]]),
           r: M2.map((x) => Math.round(x * 1e4) / 1e4),
           s: [r1(dim[0]), r1(dim[1]), r1(dim[2])],
+          ...(anim !== null ? { a: anim } : {}),
         });
       }
     }
-    for (const k of n.kids) caminar(k, env, M2, T2, id, enModulo);
+    for (const k of n.kids) caminar(k, env, M2, T2, id, enModulo, anim);
   };
 
   for (const k of escena.kids) {
@@ -345,14 +427,28 @@ export function interpretarEscena3D(texto: string): Escena3D {
         idEscena: k.idEscena,
         nombre: k.nombreModulo || k.nombre,
         familia: k.familia,
+        catalogo: k.catalogo,
         dim: [env.L ?? 0, env.H ?? 0, env.P ?? 0],
       });
-      caminar(k, {}, ID3, [0, 0, 0], k.idEscena, true);
+      caminar(k, {}, ID3, [0, 0, 0], k.idEscena, true, null);
     } else if (k.objeti === "PA") {
-      caminar(k, {}, ID3, [0, 0, 0], k.idEscena, false);
+      caminar(k, {}, ID3, [0, 0, 0], k.idEscena, false, null);
+    } else if (k.objeti === "SL" && k.materialCad && !out.materialSuelo) {
+      out.materialSuelo = k.materialCad;
     }
   }
   out.suelo = inicioParedes;
+  // Los colores de un mueble son de su catálogo; paredes y piso son decoración (catálogo 641).
+  const catDe = new Map(out.modulos.map((m) => [m.idEscena, m.catalogo]));
+  out.materiales = [
+    ...new Set(
+      [
+        ...out.cajas.filter((c) => c.m !== "").map((c) => `${catDe.get(c.mod ?? -1) ?? "4"}/${c.m}`),
+        ...out.paredes.filter((w) => w.m).map((w) => `641/${w.m}`),
+        ...(out.materialSuelo ? [`641/${out.materialSuelo}`] : []),
+      ],
+    ),
+  ];
   out.sinResolver = [...sinResolver].slice(0, 50);
   return out;
 }

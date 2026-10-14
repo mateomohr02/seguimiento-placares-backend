@@ -1,6 +1,7 @@
 import { Prisma } from "@prisma/client";
 import { prisma } from "../../../config/prisma";
 import { AppError } from "../../../utils/AppError";
+import { asegurarTexturas } from "../../texturas-3d/texturas-3d.service";
 import { interpretarEscena3D, PARSER_VERSION, type Escena3D } from "../parser/escena-3d.parser";
 
 // Escenas 3D de un pedido (.3d de TeoWin), solo lectura (diseño.md §13).
@@ -74,6 +75,8 @@ export async function crearEscena(
     },
     select: metaSelect,
   });
+  // Copia a la base las texturas de los materiales de la escena (mejor esfuerzo).
+  await asegurarTexturas(escena.materiales);
   return toDTO(creada);
 }
 
