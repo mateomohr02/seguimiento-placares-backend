@@ -7,7 +7,7 @@ import { evaluar, grupos, oculto, type Entorno } from "./expresion";
 // extrusiones no rectangulares (herrajes, ventanas) ni luces, cotas o texturas de pared; solo paneles y paredes.
 // Subir PARSER_VERSION cuando cambie la salida (el original se conserva en la
 // base, así se puede re-interpretar).
-export const PARSER_VERSION = 2;
+export const PARSER_VERSION = 4;
 
 export interface CajaEscena {
   /** idEscena del módulo al que pertenece (null = no asociada). */
@@ -55,6 +55,8 @@ interface Primitiva {
   args: string[][];
   m: string;
   c: [number, number, number] | null;
+  /** transp(0): la pieza está en el .3d pero TeoWin no la dibuja (volumen auxiliar). */
+  invisible: boolean;
 }
 
 class Nodo {
@@ -71,6 +73,8 @@ class Nodo {
   nombreModulo = "";
   /** Marca `nuncavis3d`: la pieza no se dibuja nunca en 3D (se salta con todo lo que cuelga). */
   nuncaVisible = false;
+  /** Espesor del tablero (matTablero con la cara 128), si es numérico. */
+  espesor: number | null = null;
   /** Condición de `invisibilidad(...)`, se evalúa con las medidas del mueble. */
   invisibilidad: string | null = null;
   prims: Primitiva[] = [];
@@ -112,6 +116,7 @@ function parsearArbol(texto: string): Nodo {
     else if ((m = /^objeti"(\w*)"/.exec(t))) o.objeti = m[1];
     else if ((m = /^familia"(\w+)"/.exec(t))) o.familia = m[1];
     else if ((m = /^IDCatalogo"(\d+)"/.exec(t))) o.catalogo = m[1];
+    else if ((m = /^matTablero 128,"[^"]*","([\d.]+)"/.exec(t))) o.espesor = Number(m[1]);
     else if (t.startsWith("invisibilidad(")) o.invisibilidad = t.slice(14, t.lastIndexOf(")"));
     else if ((m = /^nombreModulo"([^"]*)"/.exec(t))) o.nombreModulo = m[1];
     else if (t.startsWith("eti") || /^mat"/.test(t)) {
@@ -125,6 +130,7 @@ function parsearArbol(texto: string): Nodo {
           args: grupos(prim[1] === "extrudeSp" ? prim[2].split(/tg\(/)[0] : prim[2]),
           m: mat,
           c: col ? [Number(col[1]), Number(col[2]), Number(col[3])] : null,
+          invisible: /\btransp\(0(\.0+)?\)/.test(t),
         });
       }
     }
@@ -232,14 +238,23 @@ export function interpretarEscena3D(texto: string): Escena3D {
 
   const inicioParedes: [number, number][] = [];
 
+  // Variables que en el .3d valen "el espesor del material de esta pieza" (mymat, y los GRxx = "matxx"):
+  // su valor real está en el matTablero de cada pieza, no en un parámetro.
+  const espesorVars = new Set<string>(["mymat"]);
+
   const caminar = (n: Nodo, envPadre: Entorno, M: Mat3, T: Vec3, idEscena: number | null, enModulo: boolean) => {
     if (NODOS_IGNORADOS.has(n.nombre) || n.nuncaVisible) return;
     const env: Entorno = { ...envPadre };
     for (const [k, v] of Object.entries(n.param)) {
       if (/^-?\d+(\.\d+)?$/.test(v)) env[k] = Number(v);
       else if (v === "") env[k] = 0; // parámetro sin uso en este mueble
-      else if (/^mat/i.test(v)) env[k] = ESPESOR_DEFECTO;
+      else if (/^mat/i.test(v)) {
+        espesorVars.add(k);
+        env[k] = env[k] ?? ESPESOR_DEFECTO;
+      }
     }
+    env.mymat = env.mymat ?? ESPESOR_DEFECTO;
+    if (n.espesor !== null && n.espesor > 0) for (const v of espesorVars) env[v] = n.espesor;
     for (const [k, v] of Object.entries(n.use)) {
       const x = ev(v, env);
       if (x !== null) env[k] = x;
@@ -268,6 +283,7 @@ export function interpretarEscena3D(texto: string): Escena3D {
     const id = n.idEscena ?? idEscena;
 
     for (const pr of n.prims) {
+      if (pr.invisible) continue;
       if (pr.tipo === "faceset" || pr.tipo === "face") {
         if (n.objeti !== "PAI" && n.objeti !== "PAE") continue;
         const dim = evVec(pr.args[1], env);
