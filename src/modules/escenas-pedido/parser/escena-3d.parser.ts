@@ -8,7 +8,7 @@ import { evaluar, grupos, oculto, type Entorno } from "./expresion";
 // mueven (cajones y hojas corredizas) para animarlas, y los materiales de paredes y piso.
 // Subir PARSER_VERSION cuando cambie la salida (el original se conserva en la
 // base, así se puede re-interpretar).
-export const PARSER_VERSION = 6;
+export const PARSER_VERSION = 10;
 
 export interface CajaEscena {
   /** idEscena del módulo al que pertenece (null = no asociada). */
@@ -25,6 +25,8 @@ export interface CajaEscena {
   s: [number, number, number];
   /** Índice en `animaciones` si la pieza se mueve con un cajón o una hoja corrediza. */
   a?: number;
+  /** Catálogo de la pieza cuando no es el 4 (ej. 658 = puertas, 3 = cocinas): define dónde buscar su textura. */
+  k?: string;
 }
 
 /** Grupo de piezas que se desplazan juntas: un cajón que se abre o una hoja corrediza. */
@@ -51,6 +53,8 @@ export interface ModuloEscena {
   familia: string;
   /** Catálogo del mueble (4 = Placares, 3 = Cocinas): los códigos de material son de ese catálogo. */
   catalogo: string;
+  /** Hacia dónde mira el frente del mueble en la escena (vector unitario en planta). */
+  frente: [number, number, number];
   /** Ancho, alto y profundidad del mueble (use L/H/P). */
   dim: [number, number, number];
 }
@@ -224,7 +228,10 @@ function cajaDeExtrusion(
   const off = evVec(args[1], env);
   const pts = args.slice(2).map((g) => evVec(g, env));
   if (!size || !off || pts.length < 3 || pts.some((p) => p === null)) return null;
-  const P = pts as Vec3[];
+  // Perfiles con relieve (puertas con moldura): solo cuenta el primer contorno cerrado.
+  let P = pts as Vec3[];
+  const cierre = P.findIndex((p, i) => i > 1 && p.every((v, j) => Math.abs(v - P[0][j]) < 1e-6));
+  if (cierre > 1) P = P.slice(0, cierre + 1);
   const min: Vec3 = [Infinity, Infinity, Infinity];
   const max: Vec3 = [-Infinity, -Infinity, -Infinity];
   for (const p of P) {
@@ -244,6 +251,38 @@ function cajaDeExtrusion(
   // Espesor 0 en el .3d: depende del material del mueble (script del catálogo).
   dim[plano] = size[plano] > 0.5 ? size[plano] : ESPESOR_DEFECTO;
   return [[off[0] + min[0], off[1] + min[1], off[2] + min[2]], dim];
+}
+
+// Un objeto de primer nivel es un mueble si es de un catálogo de fábrica (no del 1, general, ni del 641,
+// decoración) y no es un elemento del entorno (pared, suelo, techo, cota, luz).
+const NO_MUEBLE = new Set(["PA", "SL", "ST", "CTH", "CTV", "CL", "LZ"]);
+function esMueble(k: Nodo): boolean {
+  return k.idEscena !== null && k.catalogo !== "" && k.catalogo !== "1" && k.catalogo !== "641" && !NO_MUEBLE.has(k.objeti);
+}
+
+// Parámetros cuyo valor es una expresión sobre otros (HUE1 = "LIZQ+[LHUECO-LIZQ-LDER]/2+AJCR"):
+// se resuelven con lo que ya está definido, repitiendo hasta que no avance nada (pueden depender
+// unos de otros en cualquier orden). Los que no se pueden resolver (colores, textos) se ignoran.
+function resolverParametros(n: Nodo, env: Entorno) {
+  const pendientes = Object.entries(n.param).filter(([, v]) => v !== "" && !/^-?\d+(\.\d+)?$/.test(v) && !/^mat/i.test(v));
+  for (let pasada = 0; pasada < 6 && pendientes.length > 0; pasada++) {
+    let avanzo = false;
+    for (let i = pendientes.length - 1; i >= 0; i--) {
+      const x = evaluar(pendientes[i][1], env);
+      if (x === null) continue;
+      env[pendientes[i][0]] = x;
+      pendientes.splice(i, 1);
+      avanzo = true;
+    }
+    if (!avanzo) break;
+  }
+}
+
+// El frente de un mueble es su +Z local; la rotación del mueble lo orienta en la escena.
+function frenteDe(k: Nodo): [number, number, number] {
+  const a = (k.ang ?? []).slice(0, 3).map((x) => evaluar(x, {}) ?? 0);
+  const f = apply(rotacion(a[0] ?? 0, a[1] ?? 0, a[2] ?? 0), [0, 0, 1]);
+  return [r4(f[0]), r4(f[1]), r4(f[2])];
 }
 
 // Fracción de apertura (porcenAperOpn) declarada en el propio nodo o en algún descendiente.
@@ -304,10 +343,15 @@ export function interpretarEscena3D(texto: string): Escena3D {
     M: Mat3,
     T: Vec3,
     idEscena: number | null,
-    enModulo: boolean,
+    enModuloPadre: boolean,
     animPadre: number | null,
+    catPadre: string,
   ) => {
     if (NODOS_IGNORADOS.has(n.nombre) || n.nuncaVisible) return;
+    // Un objeto de un catálogo de fábrica colgado de una pared (ej. una puerta de paso, catálogo 658)
+    // también se dibuja; los del catálogo 1 (ventanas, cotas) y 641 (decoración) no.
+    const cat = n.catalogo || catPadre;
+    const enModulo = enModuloPadre || (n.catalogo !== "" && n.catalogo !== "1" && n.catalogo !== "641");
     const env: Entorno = { ...envPadre };
     for (const [k, v] of Object.entries(n.param)) {
       if (/^-?\d+(\.\d+)?$/.test(v)) env[k] = Number(v);
@@ -323,14 +367,18 @@ export function interpretarEscena3D(texto: string): Escena3D {
       const x = ev(v, env);
       if (x !== null) env[k] = x;
     }
+    resolverParametros(n, env);
     // La condición usa las medidas del mueble (las del padre), antes de aplicar las propias.
     if (n.invisibilidad && oculto(n.invisibilidad, env) === true) return;
     let pos: Vec3 = [0, 0, 0];
     if (n.virtual) {
       const p = evVec(n.virtual[0], env);
-      if (p) pos = p;
       const s = evVec(n.virtual[1], env);
-      if (s) [env.L, env.H, env.P] = s;
+      // Sin posición o medida no se puede ubicar la pieza ni lo que cuelga de ella: se omite
+      // (heredar el tamaño del padre dibujaba cajas gigantes).
+      if (!p || !s) return;
+      pos = p;
+      [env.L, env.H, env.P] = s;
     }
     if (n.pos) {
       const p = evVec(n.pos, env);
@@ -408,16 +456,18 @@ export function interpretarEscena3D(texto: string): Escena3D {
           r: M2.map((x) => Math.round(x * 1e4) / 1e4),
           s: [r1(dim[0]), r1(dim[1]), r1(dim[2])],
           ...(anim !== null ? { a: anim } : {}),
+          ...(cat !== "4" ? { k: cat } : {}),
         });
       }
     }
-    for (const k of n.kids) caminar(k, env, M2, T2, id, enModulo, anim);
+    for (const k of n.kids) caminar(k, env, M2, T2, id, enModulo, anim, cat);
   };
 
   for (const k of escena.kids) {
     if (k.idEscena === null) continue;
-    if (k.catalogo === "4" && k.familia) {
-      // Módulo de fábrica (catálogo 4 / Placares): lleva el idEscena de modulo.idEscena.
+    if (esMueble(k)) {
+      // Mueble de fábrica (catálogo 4 Placares, 3 Cocinas, …): lleva el idEscena de modulo.idEscena.
+      // Algunos (ej. los armarios "2200") no declaran `familia`.
       const env: Entorno = {};
       for (const [kk, v] of Object.entries(k.use)) {
         const x = evaluar(v, env);
@@ -426,13 +476,14 @@ export function interpretarEscena3D(texto: string): Escena3D {
       out.modulos.push({
         idEscena: k.idEscena,
         nombre: k.nombreModulo || k.nombre,
-        familia: k.familia,
+        familia: k.familia || k.nombre,
         catalogo: k.catalogo,
+        frente: frenteDe(k),
         dim: [env.L ?? 0, env.H ?? 0, env.P ?? 0],
       });
-      caminar(k, {}, ID3, [0, 0, 0], k.idEscena, true, null);
+      caminar(k, {}, ID3, [0, 0, 0], k.idEscena, true, null, k.catalogo);
     } else if (k.objeti === "PA") {
-      caminar(k, {}, ID3, [0, 0, 0], k.idEscena, false, null);
+      caminar(k, {}, ID3, [0, 0, 0], k.idEscena, false, null, "1");
     } else if (k.objeti === "SL" && k.materialCad && !out.materialSuelo) {
       out.materialSuelo = k.materialCad;
     }
@@ -443,7 +494,7 @@ export function interpretarEscena3D(texto: string): Escena3D {
   out.materiales = [
     ...new Set(
       [
-        ...out.cajas.filter((c) => c.m !== "").map((c) => `${catDe.get(c.mod ?? -1) ?? "4"}/${c.m}`),
+        ...out.cajas.filter((c) => c.m !== "").map((c) => `${c.k ?? catDe.get(c.mod ?? -1) ?? "4"}/${c.m}`),
         ...out.paredes.filter((w) => w.m).map((w) => `641/${w.m}`),
         ...(out.materialSuelo ? [`641/${out.materialSuelo}`] : []),
       ],

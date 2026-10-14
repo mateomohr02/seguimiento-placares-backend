@@ -24,6 +24,8 @@ const DIRS: Record<string, { planas: string[]; arboles: string[] }> = {
   "4": { planas: ["4/Colores", "Showroom/4/colores"], arboles: ["4/Texturas"] },
   "3": { planas: ["3/Colores", "Showroom/3/colores"], arboles: ["3/Texturas"] },
   "641": { planas: ["Showroom/641/colores", "641/Colores"], arboles: ["641/Texturas"] },
+  // 658 = puertas de paso (colgadas de las paredes)
+  "658": { planas: ["658/Colores", "Showroom/658/colores"], arboles: ["658/Texturas"] },
 };
 const CATALOGOS = Object.keys(DIRS);
 
@@ -174,4 +176,39 @@ export async function guardarTextura(catalogo: string, material: string, mime: s
     update: { nombre: material, mime, tamano: contenido.length, contenido, origen: "manual" },
   });
   return { clave: id, tamano: contenido.length };
+}
+
+/**
+ * Copia a la base TODAS las texturas de las carpetas de colores de los catálogos (Placares, Cocinas,
+ * puertas y decoración): unos 60 MB. Los árboles grandes de decoración (641/Texturas) quedan a
+ * demanda. Idempotente: no pisa lo que ya está (ni lo subido a mano).
+ */
+export async function sincronizarCatalogos(log: (msg: string) => void = () => {}) {
+  const total = { copiadas: 0, existentes: 0, omitidas: 0 };
+  for (const cat of CATALOGOS) {
+    let nuevas = 0;
+    for (const rel of DIRS[cat].planas) {
+      const archivos = await listarCarpeta(rel);
+      for (const [clave, archivo] of archivos) {
+        const id = claveDb(cat, clave);
+        if (await prisma.textura3D.findUnique({ where: { clave: id }, select: { clave: true } })) {
+          total.existentes++;
+          continue;
+        }
+        const info = await stat(archivo);
+        if (info.size > MAX_TEXTURA_BYTES) {
+          total.omitidas++;
+          continue;
+        }
+        const contenido = await readFile(archivo);
+        await prisma.textura3D.create({
+          data: { clave: id, nombre: path.basename(archivo, path.extname(archivo)), mime: mimeDe(archivo), tamano: contenido.length, contenido, origen: "teowin" },
+        });
+        total.copiadas++;
+        nuevas++;
+      }
+    }
+    log(`Catálogo ${cat}: ${nuevas} nuevas`);
+  }
+  return total;
 }

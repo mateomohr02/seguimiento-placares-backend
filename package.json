@@ -11,7 +11,8 @@
     "prisma:migrate": "prisma migrate dev",
     "prisma:deploy": "prisma migrate deploy",
     "prisma:studio": "prisma studio",
-    "usuario:sql": "tsx scripts/usuario-sql.ts"
+    "usuario:sql": "tsx scripts/usuario-sql.ts",
+    "texturas3d:sincronizar": "tsx scripts/texturas-3d-sincronizar.ts"
   },
   "dependencies": {
     "@prisma/client": "^5.22.0",

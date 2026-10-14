@@ -31,6 +31,8 @@ export function evaluar(expr: string, env: Entorno): number | null {
       i++;
       return primario();
     }
+    // Operando vacío (ej. "/2": en el .3d quedó sin su variable): TeoWin lo toma como 0.
+    if (c === "/" || c === "*") return 0;
     const num = /^\d+(\.\d+)?|^\.\d+/.exec(src.slice(i));
     if (num) {
       i += num[0].length;
