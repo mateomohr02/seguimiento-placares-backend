@@ -1,12 +1,13 @@
-import { evaluar, grupos, type Entorno } from "./expresion";
+import { evaluar, grupos, oculto, type Entorno } from "./expresion";
 
 // Intérprete (solo lectura) de los .3d de TeoWin — diseño.md §13. Devuelve una
 // geometría liviana para el visor: cajas (tableros y extrusiones rectangulares),
-// caras de pared y el contorno del suelo. v1: no interpreta tube / malla ni
-// extrusiones no rectangulares (tiradores, herrajes, ventanas) ni luces, cotas o texturas de pared; solo paneles y paredes.
+// caras de pared y el contorno del suelo. Respeta `nuncavis3d` e `invisibilidad(...)` (piezas
+// que TeoWin no dibuja según las medidas del mueble). No interpreta tube / malla ni
+// extrusiones no rectangulares (herrajes, ventanas) ni luces, cotas o texturas de pared; solo paneles y paredes.
 // Subir PARSER_VERSION cuando cambie la salida (el original se conserva en la
 // base, así se puede re-interpretar).
-export const PARSER_VERSION = 1;
+export const PARSER_VERSION = 2;
 
 export interface CajaEscena {
   /** idEscena del módulo al que pertenece (null = no asociada). */
@@ -68,6 +69,10 @@ class Nodo {
   familia = "";
   catalogo = "";
   nombreModulo = "";
+  /** Marca `nuncavis3d`: la pieza no se dibuja nunca en 3D (se salta con todo lo que cuelga). */
+  nuncaVisible = false;
+  /** Condición de `invisibilidad(...)`, se evalúa con las medidas del mueble. */
+  invisibilidad: string | null = null;
   prims: Primitiva[] = [];
   constructor(readonly nombre: string) {}
 }
@@ -97,6 +102,7 @@ function parsearArbol(texto: string): Nodo {
       continue;
     }
     const o = pila[pila.length - 1];
+    if (/nuncavis3d/.test(t) && !t.startsWith("eti")) o.nuncaVisible = true;
     if ((m = /^use (\w+)\s*=(.*)$/.exec(t))) o.use[m[1]] = m[2].trim();
     else if ((m = /^param (\w+)\s*=\s*"(.*)"/.exec(t))) o.param[m[1]] = m[2];
     else if (t.startsWith("virtual(")) o.virtual = grupos(t).slice(0, 2);
@@ -106,15 +112,17 @@ function parsearArbol(texto: string): Nodo {
     else if ((m = /^objeti"(\w*)"/.exec(t))) o.objeti = m[1];
     else if ((m = /^familia"(\w+)"/.exec(t))) o.familia = m[1];
     else if ((m = /^IDCatalogo"(\d+)"/.exec(t))) o.catalogo = m[1];
+    else if (t.startsWith("invisibilidad(")) o.invisibilidad = t.slice(14, t.lastIndexOf(")"));
     else if ((m = /^nombreModulo"([^"]*)"/.exec(t))) o.nombreModulo = m[1];
     else if (t.startsWith("eti") || /^mat"/.test(t)) {
-      const prim = /\b(taulerv|taulerh|taulerf|extrude|faceset|face)(\(.*)$/.exec(t);
+      const prim = /\b(taulerv|taulerh|taulerf|extrudeSp|extrude|faceset|face)(\(.*)$/.exec(t);
       if (prim) {
         const mat = /mat"([^"]*)"/.exec(t)?.[1] ?? "";
         const col = /color\(([\d.]+),([\d.]+),([\d.]+)\)/.exec(t);
         o.prims.push({
           tipo: prim[1],
-          args: grupos(prim[2]),
+          // extrudeSp trae un segundo perfil de tangentes después de `tg`: solo se usa el primero.
+          args: grupos(prim[1] === "extrudeSp" ? prim[2].split(/tg\(/)[0] : prim[2]),
           m: mat,
           c: col ? [Number(col[1]), Number(col[2]), Number(col[3])] : null,
         });
@@ -225,7 +233,7 @@ export function interpretarEscena3D(texto: string): Escena3D {
   const inicioParedes: [number, number][] = [];
 
   const caminar = (n: Nodo, envPadre: Entorno, M: Mat3, T: Vec3, idEscena: number | null, enModulo: boolean) => {
-    if (NODOS_IGNORADOS.has(n.nombre)) return;
+    if (NODOS_IGNORADOS.has(n.nombre) || n.nuncaVisible) return;
     const env: Entorno = { ...envPadre };
     for (const [k, v] of Object.entries(n.param)) {
       if (/^-?\d+(\.\d+)?$/.test(v)) env[k] = Number(v);
@@ -236,6 +244,8 @@ export function interpretarEscena3D(texto: string): Escena3D {
       const x = ev(v, env);
       if (x !== null) env[k] = x;
     }
+    // La condición usa las medidas del mueble (las del padre), antes de aplicar las propias.
+    if (n.invisibilidad && oculto(n.invisibilidad, env) === true) return;
     let pos: Vec3 = [0, 0, 0];
     if (n.virtual) {
       const p = evVec(n.virtual[0], env);
@@ -279,7 +289,7 @@ export function interpretarEscena3D(texto: string): Escena3D {
       } else if (enModulo) {
         let off: Vec3 | null;
         let dim: Vec3 | null;
-        if (pr.tipo === "extrude") {
+        if (pr.tipo === "extrude" || pr.tipo === "extrudeSp") {
           const caja = cajaDeExtrusion(pr.args, env, ev, evVec);
           if (!caja) continue;
           [off, dim] = caja;

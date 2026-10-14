@@ -85,6 +85,35 @@ export function evaluar(expr: string, env: Entorno): number | null {
   return fallo || !Number.isFinite(r) ? null : r;
 }
 
+/**
+ * Condición `invisibilidad(...)` de un objeto del .3d: términos `cmp[a;b;op]` y `not[x]`
+ * pegados uno a otro, que se leen como "o" (basta que uno se cumpla para ocultarlo).
+ * null si no hay ningún término que se pueda evaluar (en ese caso el objeto se muestra).
+ */
+export function oculto(expr: string, env: Entorno): boolean | null {
+  const terminos = /(cmp|not)\[((?:[^\[\]]|\[[^\]]*\])*)\]/g;
+  let alguno = false;
+  let m: RegExpExecArray | null;
+  while ((m = terminos.exec(expr))) {
+    if (m[1] === "not") {
+      const v = evaluar(m[2], env);
+      if (v === null) continue;
+      alguno = true;
+      if (v === 0) return true;
+      continue;
+    }
+    const [a, b, op] = m[2].split(";").map((x) => x.trim());
+    const va = a === undefined ? null : evaluar(a, env);
+    const vb = b === undefined ? null : evaluar(b, env);
+    if (va === null || vb === null) continue;
+    alguno = true;
+    const cumple =
+      op === "=" ? va === vb : op === "<>" ? va !== vb : op === "<" ? va < vb : op === ">" ? va > vb : op === "<=" ? va <= vb : op === ">=" ? va >= vb : false;
+    if (cumple) return true;
+  }
+  return alguno ? false : null;
+}
+
 /** "(a,b)(c)" → [["a","b"],["c"]], respetando paréntesis y corchetes anidados. */
 export function grupos(s: string): string[][] {
   const res: string[][] = [];
