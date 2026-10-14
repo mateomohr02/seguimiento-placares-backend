@@ -9,6 +9,7 @@ import { modulosRouter } from "./modules/modulos/modulos.router";
 import { piezasRouter } from "./modules/piezas/piezas.router";
 import { documentosDePedidoRouter, documentosPedidoRouter } from "./modules/documentos-pedido/documentos-pedido.router";
 import { planosDePedidoRouter, planosPedidoRouter } from "./modules/planos-pedido/planos-pedido.router";
+import { escenasDePedidoRouter, escenasPedidoRouter } from "./modules/escenas-pedido/escenas-pedido.router";
 import { hojasCorteRouter, hojasDeOrdenRouter } from "./modules/hojas-corte/hojas-corte.router";
 
 export const app = express();
@@ -33,6 +34,8 @@ app.use("/api/pedidos/:pedidoId/documentos", documentosDePedidoRouter);
 app.use("/api/documentos-pedido", documentosPedidoRouter);
 app.use("/api/pedidos/:pedidoId/planos", planosDePedidoRouter);
 app.use("/api/planos-pedido", planosPedidoRouter);
+app.use("/api/pedidos/:pedidoId/escenas", escenasDePedidoRouter);
+app.use("/api/escenas-pedido", escenasPedidoRouter);
 app.use("/api/pedidos", pedidosRouter);
 app.use("/api/modulos", modulosRouter);
 app.use("/api/piezas", piezasRouter);

@@ -86,6 +86,7 @@ app/backend/
 │       ├── hojas-corte/        # PDF de hojas de corte por orden + sus anotaciones (schemas/anotacion.schema.ts es el contrato compartido)
 │       ├── documentos-pedido/  # PDF de documentación por pedido (nota de pedido, remisión, escandallo, herrajes, accesorios) + anotaciones
 │       ├── planos-pedido/      # Planos por pedido (imagen JPG/PNG/WEBP o PDF), módulo opcional + anotaciones
+│       ├── escenas-pedido/     # Escenas 3D por pedido (.3d de TeoWin): solo lectura, sin anotaciones. parser/ interpreta el .3d a una geometría liviana (regla 10)
 │       ├── auth/                # Login por PIN, sesión (token firmado), middlewares autenticar / requierePermiso y claves de permiso
 │       └── sync/                # Las queries de solo-lectura contra TeoWin + agrupar-despiece.ts (cuántas piezas físicas es cada fila)
 ├── scripts/
@@ -196,13 +197,14 @@ Todos los campos que vienen directo de TeoWin (`idEscena`, `idCatalogo`, `famili
 
 ### Documentación digital (tablas aparte)
 
-Seis tablas más, agregadas por migraciones **solo aditivas** (no modifican ninguna de las anteriores; cada migración trae un `down.sql` para revertirla a mano). Guardan los archivos **dentro de Postgres** (`bytea`), así el `pg_dump` es el único backup.
+Siete tablas más, agregadas por migraciones **solo aditivas** (no modifican ninguna de las anteriores; cada migración trae un `down.sql` para revertirla a mano). Guardan los archivos **dentro de Postgres** (`bytea`), así el `pg_dump` es el único backup.
 
 | Tabla | De qué cuelga | Qué guarda |
 |---|---|---|
 | `hoja_corte` | `orden` | PDF de hoja de corte. Una orden puede tener varias (ej. MDP y MDF), cada una con su `nombre` |
 | `documento_pedido` | `pedido` | PDF con `tipo` (enum `DocumentoPedidoTipo`): `NOTA_PEDIDO` y `DETALLE_REMISION` (obligatorios en todo pedido) y los adicionales `ESCANDALLO_PLACARES`, `HERRAJES_PLACARES`, `ACCESORIOS_PLACARES`, `HERRAJES_COCINAS`, `ACCESORIOS_COCINAS` (herrajes y accesorios salen de reportes distintos según la línea). Puede haber varios del mismo tipo |
 | `plano_pedido` | `pedido` (+ `modulo`, opcional) | Plano en imagen (`image/jpeg`, `image/png`, `image/webp`) o PDF; guarda su `mime` |
+| `escena_pedido` | `pedido` | Escena 3D (`.3d` de TeoWin): el original en `contenido` (`bytea`), la geometría interpretada en `escena` (`jsonb`) y `parser_version`. Sin anotaciones (regla 10) |
 | `hoja_corte_anotacion`, `documento_pedido_anotacion`, `plano_pedido_anotacion` | cada archivo | Anotaciones: `tipo` (`TEXTO` o `DIBUJO`, enum `AnotacionTipo`), `pagina` (nulo = nota de todo el documento) y `datos` (JSON, ver regla 8) |
 
 Campos comunes: `id` (UUID), `nombre`, `nombre_archivo`, `tamano`, `contenido` (`bytea`), `creado_en`, `eliminado_en` (borrado lógico: nada se borra físicamente).
@@ -325,6 +327,16 @@ Antes había botones y endpoints manuales para finalizar módulos y pedidos y pa
 - **Orden o pedido eliminado**: sus documentos no se tocan en cascada, pero **dejan de ser accesibles** (todas las rutas responden `404`), porque cada consulta verifica que el pedido y la orden sigan vigentes.
 - **Los listados nunca traen `contenido`** (son MB por fila); el archivo se pide aparte por `/archivo`.
 - **Permisos**: subir y eliminar documentos exige `documentacion.gestionar`; crear anotaciones, `documentacion.anotar`; borrarlas, `documentacion.anotaciones.eliminar` (regla 9). **No se registra quién** subió, anotó o borró.
+
+### 10. Escenas 3D (solo lectura)
+
+- **Qué son**: el archivo `.3d` que TeoWin guarda por pedido. Se sube a mano al pedido (`POST /pedidos/:pedidoId/escenas`, body crudo con `Content-Type: application/x-teowin-3d`, `?nombre=…&archivo=…`) y el backend lo **interpreta al subirlo** (`parser/escena-3d.parser.ts`): paneles (`taulerv/h/f` y extrusiones rectangulares), caras de pared interiores y contorno del suelo, en mm (X ancho, Y alto, Z profundidad). Las medidas son expresiones que se evalúan con un evaluador propio (`parser/expresion.ts`, sin `eval`). Detalle del formato y límites: `diseño.md` §13.
+- **Validación**: máximo 40 MB; el contenido tiene que empezar con `//version` (no se confía en la extensión ni en el tipo declarado) y la escena debe tener al menos un mueble o una pared (`400` / `422` si no).
+- **Se guardan los dos**: el `.3d` original (`contenido`) para poder re-interpretarlo cuando mejore el parser, y el JSON interpretado (`escena`) que consume el visor. Los listados nunca traen ninguno de los dos.
+- **Enlace con módulos**: cada mueble de la escena lleva el `idEscena` de `modulo.idEscena`.
+- **Solo lectura**: no hay anotaciones. Permisos: `documentacion.ver` para listar y ver; `documentacion.gestionar` para subir y eliminar (borrado lógico). No se agregó ningún permiso.
+- **Orden o pedido eliminado**: la escena deja de ser accesible (`404`), igual que el resto de la documentación.
+- Subir `PARSER_VERSION` cuando cambie el formato de salida del intérprete.
 
 ### 9. Usuarios, roles y permisos
 
@@ -459,6 +471,15 @@ Mismo esquema que las hojas de corte, colgando del pedido.
 | `GET /planos-pedido/:id/archivo` · `DELETE /planos-pedido/:id` | Descargar (con su `Content-Type`) / borrado lógico | |
 | `GET`/`POST /planos-pedido/:id/anotaciones` · `DELETE /planos-pedido/:id/anotaciones/:anotacionId` | Anotaciones del plano (una imagen es un documento de una sola página) | mismo contrato (campo `plano_pedido_id`) |
 
+### Escenas 3D de un pedido
+
+| Método y ruta | Qué hace | Body / respuesta |
+|---|---|---|
+| `GET /pedidos/:pedidoId/escenas` | Lista las escenas del pedido (sin el archivo ni la geometría) | `data`: array de `{ id, pedido_id, nombre, nombre_archivo, tamano, creado_en }` |
+| `POST /pedidos/:pedidoId/escenas?nombre=...&archivo=...` | Sube e interpreta un `.3d` (regla 10). **Body: el archivo crudo** con `Content-Type: application/x-teowin-3d` | `data`: la escena creada. `400` (no es un `.3d`), `404` (pedido), `413` (más de 40 MB), `415` (falta el body), `422` (sin muebles ni paredes) |
+| `GET /escenas-pedido/:id/escena` | Geometría interpretada para el visor | `data`: `{ nombre, escena: { version, cabecera, modulos[], cajas[], paredes[], suelo[], sinResolver[] } }` |
+| `DELETE /escenas-pedido/:id` | Borrado lógico | `data: null` |
+
 ### Piezas
 
 | Método y ruta | Qué hace | Body / respuesta |
@@ -505,6 +526,7 @@ El script [`prisma/teowin-readonly-login.sql`](prisma/teowin-readonly-login.sql)
 | `409 Conflict` ("ya existe un registro activo") al sincronizar una orden que **sí** aparece en el listado de la app | Ya existe una fila activa con ese `codigoOrdenFabricacion` en la base propia | Es el comportamiento esperado — para recargarla hay que eliminarla primero (botón "Eliminar" del listado) |
 | `409 Conflict` al sincronizar una orden que **no** aparece en ningún lado de la app (nunca se sincronizó) | `tArticuloDescripciones` puede tener más de una fila para el mismo familia/articulo/idioma con distinto `idCatalogo` — sin filtrar por `idCatalogo` en el join de descripción (`src/modules/sync/teowin-orden.queries.ts`), se duplican filas y dos piezas con el mismo `idUnico` terminan en el mismo `INSERT`, lo que dispara el índice único de la sección 8.3 con un mensaje engañoso ("ya existe") aunque la orden nunca se llegó a crear | Ya corregido (el join ahora exige `ad.idCatalogo = d.idCatalogo`/`= padre.idCatalogo`) — si vuelve a aparecer con otra orden, correr la query de `fetchOrdenDespiece` a mano y comparar el conteo de filas con/sin ese join |
 | Un módulo muestra menos piezas que el escandallo de TeoWin | Familia de corte que no estaba en el filtro (caso real: los paneles `PZPP/PAN` del módulo 38 del pedido `26-02149`, 40 en vez de 42) o órdenes sincronizadas antes de la corrección | El filtro ahora sale de `tFamiliasListadosFabricacion` (listado `A02`, catálogo 4). Para órdenes ya cargadas hay que completarlas (solo agregando filas) o eliminarlas y volver a agregarlas — ver la regla 1 |
+| Una escena 3D se ve incompleta (faltan tiradores, ventanas o alguna pieza) | v1 del intérprete: no cubre `tube`, `malla` ni extrusiones no rectangulares, y usa 18 mm donde el espesor depende del catálogo | Ver los límites en `diseño.md` §13.3; la escena se puede re-interpretar desde el original guardado cuando mejore el parser |
 | `prisma generate` falla con `EPERM: operation not permitted, rename ...query_engine-windows.dll.node` | El backend (`npm run dev`, `tsx watch`) está corriendo y tiene la DLL de Prisma abierta | Detené el backend, corré `npx prisma generate` y volvelo a levantar |
 | Subir un PDF o plano falla con `413` | Supera los 40 MB | Reducir el archivo; el límite está en `MAX_PDF_BYTES` / `MAX_PLANO_BYTES` |
 | El backend no arranca: `SESSION_SECRET debe tener al menos 16 caracteres` | Falta completar esa variable en `.env` (es obligatoria desde la feature de usuarios) | Generá un valor aleatorio largo (ver [Variables de entorno](#variables-de-entorno)) |

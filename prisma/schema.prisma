@@ -81,6 +81,7 @@ model Pedido {
   modulos    Modulo[]
   documentos DocumentoPedido[]
   planos     PlanoPedido[]
+  escenas    EscenaPedido[]
 
   @@map("pedido")
 }
@@ -324,4 +325,26 @@ model Usuario {
 
   @@index([rol_id])
   @@map("usuario")
+}
+
+// Escenas 3D de un pedido (archivo .3d de TeoWin) — feature/visor-escenas-3d. Solo
+// lectura: el .3d original se guarda tal cual (`contenido`, bytea) para poder
+// re-interpretarlo si mejora el parser, y la geometría ya interpretada vive en
+// `escena` (JSON liviano que consume el visor). Sin anotaciones. Borrado lógico.
+model EscenaPedido {
+  id             String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  pedido_id      String    @db.Uuid
+  nombre         String
+  nombre_archivo String
+  tamano         Int
+  contenido      Bytes
+  escena         Json
+  parser_version Int
+  creado_en      DateTime  @default(now())
+  eliminado_en   DateTime?
+
+  pedido Pedido @relation(fields: [pedido_id], references: [id])
+
+  @@index([pedido_id])
+  @@map("escena_pedido")
 }
