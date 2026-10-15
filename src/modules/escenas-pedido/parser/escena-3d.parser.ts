@@ -8,7 +8,7 @@ import { evaluar, grupos, oculto, type Entorno } from "./expresion";
 // mueven (cajones y hojas corredizas) para animarlas, y los materiales de paredes y piso.
 // Subir PARSER_VERSION cuando cambie la salida (el original se conserva en la
 // base, así se puede re-interpretar).
-export const PARSER_VERSION = 12;
+export const PARSER_VERSION = 13;
 
 export interface CajaEscena {
   /** idEscena del módulo al que pertenece (null = no asociada). */
@@ -25,17 +25,21 @@ export interface CajaEscena {
   s: [number, number, number];
   /** Índice en `animaciones` si la pieza se mueve con un cajón o una hoja corrediza. */
   a?: number;
+  /** Opacidad (transp) cuando la pieza es translúcida (vidrio); se omite si es opaca. */
+  o?: number;
   /** Catálogo de la pieza cuando no es el 4 (ej. 658 = puertas, 3 = cocinas): define dónde buscar su textura. */
   k?: string;
 }
 
 /** Grupo de piezas que se desplazan juntas: un cajón que se abre o una hoja corrediza. */
 export interface AnimacionEscena {
-  tipo: "cajon" | "puerta";
+  tipo: "cajon" | "puerta" | "giro";
   mod: number | null;
-  /** Dirección del desplazamiento (vector unitario, en el sistema de la escena). */
+  /** Solo `giro` (puerta con bisagra): punto del eje de la bisagra, en el sistema de la escena. */
+  pivote?: [number, number, number];
+  /** Dirección del desplazamiento, o eje de giro (vector unitario, en el sistema de la escena). */
   eje: [number, number, number];
-  /** Recorrido de apertura en mm. */
+  /** Recorrido de apertura en mm (en `giro`: ángulo en grados, con signo). */
   dist: number;
 }
 
@@ -87,6 +91,8 @@ interface Primitiva {
   c: [number, number, number] | null;
   /** transp(0): la pieza está en el .3d pero TeoWin no la dibuja (volumen auxiliar). */
   invisible: boolean;
+  /** transp(x) con x < 1: pieza translúcida (vidrio). */
+  opacidad: number | null;
   /** <MATERIAL> declarado en el CAD de la propia línea (paredes). */
   materialCad: string | null;
   /** Medida de la baldosa del patrón del CAD (paredes). */
@@ -96,6 +102,8 @@ interface Primitiva {
 class Nodo {
   kids: Nodo[] = [];
   use: Record<string, string> = {};
+  /** `local L=1500`: medida propia del objeto (puertas de paso, que no declaran `use`). */
+  local: Record<string, number> = {};
   param: Record<string, string> = {};
   virtual: string[][] | null = null;
   ang: string[] | null = null;
@@ -115,6 +123,8 @@ class Nodo {
   seAbre = false;
   /** Marca `corredera`: hoja de puerta corrediza. */
   corredera = false;
+  /** anguloAper(n): puerta con bisagra, ángulo máximo de apertura en grados. */
+  anguloAper: number | null = null;
   /** porcenAperOpn: fracción del recorrido que se abre (0..1). */
   porcen: number | null = null;
   /** <MATERIAL> del CAD del nodo (piso). */
@@ -123,6 +133,13 @@ class Nodo {
   tile: [number, number] | null = null;
   prims: Primitiva[] = [];
   constructor(readonly nombre: string) {}
+}
+
+// transp(0.6) → 0.6; opaco (1) o sin dato → null.
+function opacidadDe(t: string): number | null {
+  const m = /\btransp\(([\d.]+)\)/.exec(t);
+  const v = m ? Number(m[1]) : 1;
+  return v > 0 && v < 1 ? v : null;
 }
 
 // Patrón de baldosas de un CAD (`<J>0</J><Y>200</Y><X>200</X>`): medida de cada baldosa en mm.
@@ -134,7 +151,8 @@ function tileDeCad(t: string): [number, number] | null {
   return x > 10 && y > 10 ? [x, y] : null;
 }
 
-const NODOS_IGNORADOS = new Set(["mecanizado", "label", "defespigameca"]);
+// "objpath" es el volumen del hueco que la puerta de paso abre en la pared y "objformapath" el marco de cada hoja (un sólido sin el hueco, que no se puede restar): no se dibujan.
+const NODOS_IGNORADOS = new Set(["mecanizado", "label", "defespigameca", "objpath", "objformapath"]);
 
 function parsearArbol(texto: string): Nodo {
   const raiz = new Nodo("ROOT");
@@ -160,10 +178,13 @@ function parsearArbol(texto: string): Nodo {
       continue;
     }
     const o = pila[pila.length - 1];
-    if (/nuncavis3d/.test(t) && !t.startsWith("eti")) o.nuncaVisible = true;
+    // `nuncavis3d` e `invisib` (ej. los tiradores de un armario sin tirador): TeoWin no dibuja la pieza.
+    if (/\b(nuncavis3d|invisib)\b/.test(t) && !t.startsWith("eti")) o.nuncaVisible = true;
     if (!t.startsWith("eti")) {
       if (/\bseabre\b/.test(t)) o.seAbre = true;
       if (/\bcorredera\b/.test(t)) o.corredera = true;
+      const aa = /\banguloAper\((\d+(?:\.\d+)?)\)/.exec(t);
+      if (aa) o.anguloAper = Number(aa[1]);
       const po = /porcenAperOpn\(([\d.]+)\)/.exec(t);
       if (po) o.porcen = Number(po[1]);
     }
@@ -171,7 +192,8 @@ function parsearArbol(texto: string): Nodo {
       o.materialCad = /<MATERIAL>([^<]+)<\/MATERIAL>/.exec(t)?.[1]?.trim() || null;
     }
     if (o.tile === null) o.tile = tileDeCad(t);
-    if ((m = /^use (\w+)\s*=(.*)$/.exec(t))) o.use[m[1]] = m[2].trim();
+    if ((m = /^local (\w+)\s*=(-?\d+(?:\.\d+)?)$/.exec(t))) o.local[m[1]] = Number(m[2]);
+    else if ((m = /^use (\w+)\s*=(.*)$/.exec(t))) o.use[m[1]] = m[2].trim();
     else if ((m = /^param (\w+)\s*=\s*"(.*)"/.exec(t))) o.param[m[1]] = m[2];
     else if (t.startsWith("virtual(")) o.virtual = grupos(t).slice(0, 2);
     else if (t.startsWith("ang(")) o.ang = grupos(t)[0] ?? null;
@@ -199,6 +221,7 @@ function parsearArbol(texto: string): Nodo {
           m: mat,
           c: col ? [Number(col[1]), Number(col[2]), Number(col[3])] : null,
           invisible: /\btransp\(0(\.0+)?\)/.test(completa),
+          opacidad: opacidadDe(completa),
           materialCad: /<MATERIAL>([^<]+)<\/MATERIAL>/.exec(completa)?.[1]?.trim() || null,
           tile: tileDeCad(completa),
         });
@@ -250,7 +273,8 @@ function cajaDeExtrusion(
 ): [Vec3, Vec3] | null {
   const size = evVec(args[0], env);
   const off = evVec(args[1], env);
-  const pts = args.slice(2).map((g) => evVec(g, env));
+  // Los grupos de menos de 3 valores que siguen al perfil (`NumCapas(12)(1)`) no son puntos.
+  const pts = args.slice(2).filter((g) => g.length >= 3).map((g) => evVec(g, env));
   if (!size || !off || pts.length < 3 || pts.some((p) => p === null)) return null;
   // Perfiles con relieve (puertas con moldura): solo cuenta el primer contorno cerrado.
   let P = pts as Vec3[];
@@ -370,6 +394,7 @@ export function interpretarEscena3D(texto: string): Escena3D {
     enModuloPadre: boolean,
     animPadre: number | null,
     catPadre: string,
+    enCorr = false,
   ) => {
     if (NODOS_IGNORADOS.has(n.nombre) || n.nuncaVisible) return;
     // Un objeto de un catálogo de fábrica colgado de una pared (ej. una puerta de paso, catálogo 658)
@@ -391,6 +416,8 @@ export function interpretarEscena3D(texto: string): Escena3D {
       const x = ev(v, env);
       if (x !== null) env[k] = x;
     }
+    // Un objeto sin `use` pero con `local L/H/P` (puerta de paso) tiene esa medida, no la del padre.
+    for (const k of ["L", "H", "P"]) if (n.use[k] === undefined && n.local[k] !== undefined && !n.virtual) env[k] = n.local[k];
     resolverParametros(n, env);
     // La condición usa las medidas del mueble (las del padre), antes de aplicar las propias.
     if (n.invisibilidad && oculto(n.invisibilidad, env) === true) return;
@@ -422,7 +449,30 @@ export function interpretarEscena3D(texto: string): Escena3D {
     // profundidad; una hoja `corredera` más angosta que el mueble corre hacia el otro extremo.
     let anim = animPadre;
     if (enModulo) {
-      if (n.seAbre && env.P > 0) {
+      if (n.seAbre && enCorr && envPadre.L !== undefined && env.L !== undefined) {
+        // Hoja de una puerta de paso corrediza: corre en el plano de la puerta (X), no hacia el frente.
+        const sentido = pos[0] + env.L / 2 < envPadre.L / 2 ? 1 : -1;
+        const e = apply(M, [sentido, 0, 0]);
+        const dist = (n.porcen ?? 0.85) * Math.max(0, envPadre.L - env.L);
+        out.animaciones.push({ tipo: "puerta", mod: id, eje: [r4(e[0]), r4(e[1]), r4(e[2])], dist: r1(dist) });
+        anim = out.animaciones.length - 1;
+      } else if (n.anguloAper !== null && envPadre.L !== undefined && env.L !== undefined && env.L > 0 && env.H > 0) {
+        // Puerta con bisagra: gira sobre el canto de su lado exterior (la bisagra está del lado del mueble
+        // al que pertenece la hoja) hacia el frente (+Z local del mueble).
+        const derecha = pos[0] + env.L / 2 > envPadre.L / 2 + 1;
+        const lp: Vec3 = [derecha ? env.L : 0, 0, 0];
+        const d = apply(M2, lp);
+        const eje = apply(M2, [0, 1, 0]);
+        const grados = n.anguloAper * (buscarPorcen(n) ?? 0.85);
+        out.animaciones.push({
+          tipo: "giro",
+          mod: id,
+          eje: [r4(eje[0]), r4(eje[1]), r4(eje[2])],
+          pivote: rv([T2[0] + d[0], T2[1] + d[1], T2[2] + d[2]]),
+          dist: r1(derecha ? grados : -grados),
+        });
+        anim = out.animaciones.length - 1;
+      } else if (n.seAbre && env.P > 0) {
         const e = apply(M, [0, 0, 1]);
         out.animaciones.push({ tipo: "cajon", mod: id, eje: [r4(e[0]), r4(e[1]), r4(e[2])], dist: r1((n.porcen ?? 0.85) * env.P) });
         anim = out.animaciones.length - 1;
@@ -484,11 +534,12 @@ export function interpretarEscena3D(texto: string): Escena3D {
           r: M2.map((x) => Math.round(x * 1e4) / 1e4),
           s: [r1(dim[0]), r1(dim[1]), r1(dim[2])],
           ...(anim !== null ? { a: anim } : {}),
+          ...(pr.opacidad !== null ? { o: pr.opacidad } : {}),
           ...(cat !== "4" ? { k: cat } : {}),
         });
       }
     }
-    for (const k of n.kids) caminar(k, env, M2, T2, id, enModulo, anim, cat);
+    for (const k of n.kids) caminar(k, env, M2, T2, id, enModulo, anim, cat, enCorr || n.corredera);
   };
 
   for (const k of escena.kids) {
