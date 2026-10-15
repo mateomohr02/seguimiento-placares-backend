@@ -8,7 +8,7 @@ import { evaluar, grupos, oculto, type Entorno } from "./expresion";
 // mueven (cajones y hojas corredizas) para animarlas, y los materiales de paredes y piso.
 // Subir PARSER_VERSION cuando cambie la salida (el original se conserva en la
 // base, así se puede re-interpretar).
-export const PARSER_VERSION = 13;
+export const PARSER_VERSION = 14;
 
 export interface CajaEscena {
   /** idEscena del módulo al que pertenece (null = no asociada). */
@@ -51,6 +51,8 @@ export interface ParedEscena {
   m?: string;
   /** Medida (mm) de la baldosa del revestimiento (patrón `enrajolat`): la textura entera cubre una baldosa. */
   t?: [number, number];
+  /** Huecos de la cara (puertas de paso), como [x0, y0, x1, y1] en mm sobre la cara: x desde el vértice 0 hacia el 1, y hacia arriba. */
+  h?: [number, number, number, number][];
 }
 
 export interface ModuloEscena {
@@ -332,6 +334,15 @@ function frenteDe(k: Nodo): [number, number, number] {
   return [r4(f[0]), r4(f[1]), r4(f[2])];
 }
 
+function buscarNodo(n: Nodo, nombre: string): Nodo | null {
+  for (const k of n.kids) {
+    if (k.nombre === nombre) return k;
+    const x = buscarNodo(k, nombre);
+    if (x) return x;
+  }
+  return null;
+}
+
 // Fracción de apertura (porcenAperOpn) declarada en el propio nodo o en algún descendiente.
 function buscarPorcen(n: Nodo): number | null {
   if (n.porcen !== null) return n.porcen;
@@ -503,10 +514,32 @@ export function interpretarEscena3D(texto: string): Escena3D {
           return rv([T2[0] + d[0], T2[1] + d[1], T2[2] + d[2]]);
         }) as ParedEscena["p"];
         const lado = n.objeti === "PAI" ? "int" : "ext";
+        // Una puerta de paso colgada de la pared (su `objpath` es el vano) deja un hueco en la cara.
+        const huecos: [number, number, number, number][] = [];
+        if (lado === "int") {
+          for (const k of n.kids) {
+            if (k.nuncaVisible || !k.pos) continue;
+            const kp = evVec(k.pos, env);
+            const vano = buscarNodo(k, "objpath")?.prims.find((q) => q.tipo === "extrude" || q.tipo === "extrudeSp");
+            if (!kp || !vano) continue;
+            const pts = vano.args.slice(2).filter((g) => g.length >= 3).map((g) => evVec(g, {}));
+            if (pts.length < 3 || pts.some((q) => q === null)) continue;
+            const xs = (pts as Vec3[]).map((q) => q[0]);
+            const ys = (pts as Vec3[]).map((q) => q[1]);
+            huecos.push([
+              r1(kp[0] + Math.min(...xs)),
+              r1(kp[1] + Math.min(...ys)),
+              r1(kp[0] + Math.max(...xs)),
+              r1(kp[1] + Math.max(...ys)),
+            ]);
+          }
+        }
         out.paredes.push(
           lado === "int" && pr.materialCad
-            ? { lado, p, m: pr.materialCad, ...(pr.tile ? { t: pr.tile } : {}) }
-            : { lado, p },
+            ? { lado, p, m: pr.materialCad, ...(pr.tile ? { t: pr.tile } : {}), ...(huecos.length ? { h: huecos } : {}) }
+            : lado === "int" && huecos.length
+              ? { lado, p, h: huecos }
+              : { lado, p },
         );
         if (lado === "int") inicioParedes.push([p[0][0], p[0][2]]);
       } else if (enModulo) {
