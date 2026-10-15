@@ -8,7 +8,7 @@ import { evaluar, grupos, oculto, type Entorno } from "./expresion";
 // mueven (cajones y hojas corredizas) para animarlas, y los materiales de paredes y piso.
 // Subir PARSER_VERSION cuando cambie la salida (el original se conserva en la
 // base, así se puede re-interpretar).
-export const PARSER_VERSION = 10;
+export const PARSER_VERSION = 12;
 
 export interface CajaEscena {
   /** idEscena del módulo al que pertenece (null = no asociada). */
@@ -45,6 +45,8 @@ export interface ParedEscena {
   p: [number, number, number][];
   /** Material decorativo de la cara (ej. papel pintado), si lo declara. */
   m?: string;
+  /** Medida (mm) de la baldosa del revestimiento (patrón `enrajolat`): la textura entera cubre una baldosa. */
+  t?: [number, number];
 }
 
 export interface ModuloEscena {
@@ -68,6 +70,8 @@ export interface Escena3D {
   animaciones: AnimacionEscena[];
   /** Material decorativo del piso (ej. parquet), si lo declara. */
   materialSuelo: string | null;
+  /** Medida (mm) de la baldosa del piso, si el piso lleva un patrón de baldosas. */
+  sueloTile: [number, number] | null;
   /** Materiales usados como "catálogo/código" (cajas, paredes y piso), para buscar sus texturas. */
   materiales: string[];
   /** Contorno del suelo en planta [x, z] (mm), tomado de las paredes interiores. */
@@ -85,6 +89,8 @@ interface Primitiva {
   invisible: boolean;
   /** <MATERIAL> declarado en el CAD de la propia línea (paredes). */
   materialCad: string | null;
+  /** Medida de la baldosa del patrón del CAD (paredes). */
+  tile: [number, number] | null;
 }
 
 class Nodo {
@@ -113,8 +119,19 @@ class Nodo {
   porcen: number | null = null;
   /** <MATERIAL> del CAD del nodo (piso). */
   materialCad: string | null = null;
+  /** Medida de la baldosa del patrón del CAD del nodo (piso). */
+  tile: [number, number] | null = null;
   prims: Primitiva[] = [];
   constructor(readonly nombre: string) {}
+}
+
+// Patrón de baldosas de un CAD (`<J>0</J><Y>200</Y><X>200</X>`): medida de cada baldosa en mm.
+function tileDeCad(t: string): [number, number] | null {
+  const m = /<J>[-\d.]+<\/J><Y>([\d.]+)<\/Y><X>([\d.]+)<\/X>/.exec(t);
+  if (!m) return null;
+  const x = Number(m[2]);
+  const y = Number(m[1]);
+  return x > 10 && y > 10 ? [x, y] : null;
 }
 
 const NODOS_IGNORADOS = new Set(["mecanizado", "label", "defespigameca"]);
@@ -123,6 +140,7 @@ function parsearArbol(texto: string): Nodo {
   const raiz = new Nodo("ROOT");
   const pila: Nodo[] = [raiz];
   let pendiente: Nodo | null = null;
+  let etiPendiente: string | null = null;
   for (const linea of texto.split(/\r?\n/)) {
     const t = linea.trim();
     if (!t) continue;
@@ -152,6 +170,7 @@ function parsearArbol(texto: string): Nodo {
     if (t.includes("<MATERIAL>") && o.materialCad === null) {
       o.materialCad = /<MATERIAL>([^<]+)<\/MATERIAL>/.exec(t)?.[1]?.trim() || null;
     }
+    if (o.tile === null) o.tile = tileDeCad(t);
     if ((m = /^use (\w+)\s*=(.*)$/.exec(t))) o.use[m[1]] = m[2].trim();
     else if ((m = /^param (\w+)\s*=\s*"(.*)"/.exec(t))) o.param[m[1]] = m[2];
     else if (t.startsWith("virtual(")) o.virtual = grupos(t).slice(0, 2);
@@ -164,19 +183,24 @@ function parsearArbol(texto: string): Nodo {
     else if ((m = /^matTablero 128,"[^"]*","([\d.]+)"/.exec(t))) o.espesor = Number(m[1]);
     else if (t.startsWith("invisibilidad(")) o.invisibilidad = t.slice(14, t.lastIndexOf(")"));
     else if ((m = /^nombreModulo"([^"]*)"/.exec(t))) o.nombreModulo = m[1];
-    else if (t.startsWith("eti") || /^mat"/.test(t)) {
-      const prim = /\b(taulerv|taulerh|taulerf|extrudeSp|extrude|faceset|face)(\(.*)$/.exec(t);
+    else if (t.startsWith("eti") || /^mat"/.test(t) || (etiPendiente !== null && /^(taulerv|taulerh|taulerf|extrudeSp|extrude)\(/.test(t))) {
+      // A veces la primitiva viene en la línea siguiente a la de `eti"..." mat"..."` (tiras de canto): se unen.
+      const esEti = t.startsWith("eti") || /^mat"/.test(t);
+      const completa: string = !esEti && etiPendiente !== null ? `${etiPendiente} ${t}` : t;
+      const prim = /\b(taulerv|taulerh|taulerf|extrudeSp|extrude|faceset|face)(\(.*)$/.exec(completa);
+      etiPendiente = prim ? null : esEti ? t : etiPendiente;
       if (prim) {
-        const mat = /mat"([^"]*)"/.exec(t)?.[1] ?? "";
-        const col = /color\(([\d.]+),([\d.]+),([\d.]+)\)/.exec(t);
+        const mat = /mat"([^"]*)"/.exec(completa)?.[1] ?? "";
+        const col = /color\(([\d.]+),([\d.]+),([\d.]+)\)/.exec(completa);
         o.prims.push({
           tipo: prim[1],
           // extrudeSp trae un segundo perfil de tangentes después de `tg`: solo se usa el primero.
           args: grupos(prim[1] === "extrudeSp" ? prim[2].split(/tg\(/)[0] : prim[2]),
           m: mat,
           c: col ? [Number(col[1]), Number(col[2]), Number(col[3])] : null,
-          invisible: /\btransp\(0(\.0+)?\)/.test(t),
-          materialCad: /<MATERIAL>([^<]+)<\/MATERIAL>/.exec(t)?.[1]?.trim() || null,
+          invisible: /\btransp\(0(\.0+)?\)/.test(completa),
+          materialCad: /<MATERIAL>([^<]+)<\/MATERIAL>/.exec(completa)?.[1]?.trim() || null,
+          tile: tileDeCad(completa),
         });
       }
     }
@@ -243,9 +267,8 @@ function cajaDeExtrusion(
   const rango = [max[0] - min[0], max[1] - min[1], max[2] - min[2]];
   const plano = rango.findIndex((r) => r < 1e-6);
   if (plano < 0 || rango.filter((r) => r < 1e-6).length > 1) return null;
-  // Rectángulo alineado: todos los vértices están en las esquinas del bounding box.
-  const eje = [0, 1, 2].filter((i) => i !== plano);
-  if (!P.every((p) => eje.every((i) => Math.abs(p[i] - min[i]) < 1e-6 || Math.abs(p[i] - max[i]) < 1e-6))) return null;
+  // Un perfil que no es un rectángulo (tiras de canto con relieve, zócalos) se dibuja como su caja
+  // envolvente: no es el perfil exacto, pero muestra la tira con su material y su tamaño.
   void ev;
   const dim: Vec3 = [rango[0], rango[1], rango[2]];
   // Espesor 0 en el .3d: depende del material del mueble (script del catálogo).
@@ -314,6 +337,7 @@ export function interpretarEscena3D(texto: string): Escena3D {
     paredes: [],
     animaciones: [],
     materialSuelo: null,
+    sueloTile: null,
     materiales: [],
     suelo: [],
     sinResolver: [],
@@ -429,7 +453,11 @@ export function interpretarEscena3D(texto: string): Escena3D {
           return rv([T2[0] + d[0], T2[1] + d[1], T2[2] + d[2]]);
         }) as ParedEscena["p"];
         const lado = n.objeti === "PAI" ? "int" : "ext";
-        out.paredes.push(lado === "int" && pr.materialCad ? { lado, p, m: pr.materialCad } : { lado, p });
+        out.paredes.push(
+          lado === "int" && pr.materialCad
+            ? { lado, p, m: pr.materialCad, ...(pr.tile ? { t: pr.tile } : {}) }
+            : { lado, p },
+        );
         if (lado === "int") inicioParedes.push([p[0][0], p[0][2]]);
       } else if (enModulo) {
         let off: Vec3 | null;
@@ -484,8 +512,9 @@ export function interpretarEscena3D(texto: string): Escena3D {
       caminar(k, {}, ID3, [0, 0, 0], k.idEscena, true, null, k.catalogo);
     } else if (k.objeti === "PA") {
       caminar(k, {}, ID3, [0, 0, 0], k.idEscena, false, null, "1");
-    } else if (k.objeti === "SL" && k.materialCad && !out.materialSuelo) {
-      out.materialSuelo = k.materialCad;
+    } else if (k.objeti === "SL") {
+      if (k.materialCad && !out.materialSuelo) out.materialSuelo = k.materialCad;
+      if (k.tile && !out.sueloTile) out.sueloTile = k.tile;
     }
   }
   out.suelo = inicioParedes;
