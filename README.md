@@ -86,6 +86,8 @@ app/backend/
 │       ├── hojas-corte/        # PDF de hojas de corte por orden + sus anotaciones (schemas/anotacion.schema.ts es el contrato compartido)
 │       ├── documentos-pedido/  # PDF de documentación por pedido (nota de pedido, remisión, escandallo, herrajes, accesorios) + anotaciones
 │       ├── planos-pedido/      # Planos por pedido (imagen JPG/PNG/WEBP o PDF), módulo opcional + anotaciones
+│       ├── escenas-pedido/     # Escenas 3D por pedido (.3d de TeoWin): solo lectura, sin anotaciones. parser/ interpreta el .3d a una geometría liviana (regla 10)
+│       ├── texturas-3d/        # Texturas de los materiales de las escenas 3D, por catálogo (copiadas de la carpeta de TeoWin a la base)
 │       ├── auth/                # Login por PIN, sesión (token firmado), middlewares autenticar / requierePermiso y claves de permiso
 │       └── sync/                # Las queries de solo-lectura contra TeoWin + agrupar-despiece.ts (cuántas piezas físicas es cada fila)
 ├── scripts/
@@ -125,6 +127,7 @@ Copiá `.env.example` a `.env` y completá los valores. Nunca se sube `.env` al 
 | `TEOWIN_DB_NAME` | Nombre de la base dentro de esa instancia | `TeoWin` |
 | `TEOWIN_DB_USER` | Usuario de SQL Server | — |
 | `TEOWIN_DB_PASSWORD` | Contraseña de ese usuario | — |
+| `TEOWIN_3D_DIR` | *(opcional)* Carpeta de datos 3D de TeoWin (solo lectura) de donde se copian las texturas de las escenas 3D y se leen los objetos de la biblioteca (`<catálogo>\Catalogo\<familia>\<nombre>.3d`). Por defecto `T:/datos/3d/E_50`. Si el disco no está, las escenas se ven con colores lisos o con las texturas que ya se copiaron | `T:/datos/3d/E_50` |
 | `TEOWIN_DB_ENCRYPT` | Si la conexión requiere cifrado (mirar la config de conexión en SSMS) | `true` |
 | `TEOWIN_DB_TRUST_SERVER_CERTIFICATE` | Aceptar el certificado del servidor sin validarlo contra una CA pública | `true` |
 | `SESSION_SECRET` | **Obligatoria.** Clave que firma las sesiones. Mínimo 16 caracteres, aleatoria. Si se cambia, solo se cierran las sesiones abiertas | `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"` |
@@ -151,7 +154,7 @@ Vas a ver `Backend escuchando en puerto 4000`. Dejá esa terminal abierta mientr
 
 > **Antes de usar la app tenés que cargar al menos un usuario**: la migración de usuarios crea los roles y permisos pero **ningún usuario**, y sin sesión todo responde `401`. Ver [Alta de usuarios](#alta-de-usuarios).
 
-> Las migraciones de la documentación digital (`hoja_corte`, `documento_pedido`, `plano_pedido` y sus anotaciones) solo **agregan** tablas. Para revertir una, ejecutá su `down.sql` (en `prisma/migrations/<nombre>/`) y borrá su fila de `_prisma_migrations`.
+> Las migraciones de la documentación digital (`hoja_corte`, `documento_pedido`, `plano_pedido` y sus anotaciones) y las de las escenas 3D (`escena_pedido`, `textura_3d`) solo **agregan** tablas. Para revertir una, ejecutá su `down.sql` (en `prisma/migrations/<nombre>/`) y borrá su fila de `_prisma_migrations`.
 
 Otros comandos útiles:
 
@@ -161,6 +164,9 @@ Otros comandos útiles:
 | `npm start` | Corre la versión ya compilada (`npm run build` primero) |
 | `npx prisma studio` | Abre una interfaz web para mirar/editar los datos de la base propia a mano |
 | `npx prisma migrate dev --name algo` | Crea y aplica una migración nueva después de cambiar `schema.prisma` |
+| `npm run escenas3d:reinterpretar` | Rehace las escenas 3D guardadas con la versión actual del intérprete, desde el `.3d` original de la base (`-- --todas`, `-- --nombre=26-02568`) |
+| `npm run escenas3d:probar -- <carpeta>` | Corre el intérprete sobre una carpeta de `.3d` (copias, nunca la de TeoWin) e informa tiempo, piezas, tamaño del JSON y problemas; no usa la base |
+| `npm run texturas3d:sincronizar` | Copia a la base todas las texturas de las carpetas de colores de TeoWin (catálogos 4, 3, 658 y decoración 641; ~60 MB; idempotente). Ver `diseño.md` §13.5 |
 | `npm run usuario:sql -- "<nombre>" <rol> <pin>` | Imprime el `INSERT` para dar de alta un usuario (ver [Alta de usuarios](#alta-de-usuarios)) |
 
 ---
@@ -196,13 +202,15 @@ Todos los campos que vienen directo de TeoWin (`idEscena`, `idCatalogo`, `famili
 
 ### Documentación digital (tablas aparte)
 
-Seis tablas más, agregadas por migraciones **solo aditivas** (no modifican ninguna de las anteriores; cada migración trae un `down.sql` para revertirla a mano). Guardan los archivos **dentro de Postgres** (`bytea`), así el `pg_dump` es el único backup.
+Ocho tablas más, agregadas por migraciones **solo aditivas** (no modifican ninguna de las anteriores; cada migración trae un `down.sql` para revertirla a mano). Guardan los archivos **dentro de Postgres** (`bytea`), así el `pg_dump` es el único backup.
 
 | Tabla | De qué cuelga | Qué guarda |
 |---|---|---|
 | `hoja_corte` | `orden` | PDF de hoja de corte. Una orden puede tener varias (ej. MDP y MDF), cada una con su `nombre` |
 | `documento_pedido` | `pedido` | PDF con `tipo` (enum `DocumentoPedidoTipo`): `NOTA_PEDIDO` y `DETALLE_REMISION` (obligatorios en todo pedido) y los adicionales `ESCANDALLO_PLACARES`, `HERRAJES_PLACARES`, `ACCESORIOS_PLACARES`, `HERRAJES_COCINAS`, `ACCESORIOS_COCINAS` (herrajes y accesorios salen de reportes distintos según la línea). Puede haber varios del mismo tipo |
 | `plano_pedido` | `pedido` (+ `modulo`, opcional) | Plano en imagen (`image/jpeg`, `image/png`, `image/webp`) o PDF; guarda su `mime` |
+| `escena_pedido` | `pedido` | Escena 3D (`.3d` de TeoWin): el original en `contenido` (`bytea`), la geometría interpretada en `escena` (`jsonb`) y `parser_version`. Sin anotaciones (regla 10) |
+| `textura_3d` | — (global) | Textura de un material de las escenas 3D: `clave` = `catálogo/código` en minúsculas (ej. `4/fsn`), `mime`, `contenido` (`bytea`) y `origen` (`teowin` o `manual`). Regla 10 |
 | `hoja_corte_anotacion`, `documento_pedido_anotacion`, `plano_pedido_anotacion` | cada archivo | Anotaciones: `tipo` (`TEXTO` o `DIBUJO`, enum `AnotacionTipo`), `pagina` (nulo = nota de todo el documento) y `datos` (JSON, ver regla 8) |
 
 Campos comunes: `id` (UUID), `nombre`, `nombre_archivo`, `tamano`, `contenido` (`bytea`), `creado_en`, `eliminado_en` (borrado lógico: nada se borra físicamente).
@@ -325,6 +333,18 @@ Antes había botones y endpoints manuales para finalizar módulos y pedidos y pa
 - **Orden o pedido eliminado**: sus documentos no se tocan en cascada, pero **dejan de ser accesibles** (todas las rutas responden `404`), porque cada consulta verifica que el pedido y la orden sigan vigentes.
 - **Los listados nunca traen `contenido`** (son MB por fila); el archivo se pide aparte por `/archivo`.
 - **Permisos**: subir y eliminar documentos exige `documentacion.gestionar`; crear anotaciones, `documentacion.anotar`; borrarlas, `documentacion.anotaciones.eliminar` (regla 9). **No se registra quién** subió, anotó o borró.
+
+### 10. Escenas 3D (solo lectura)
+
+- **Qué son**: el archivo `.3d` que TeoWin guarda por pedido. Se sube a mano al pedido (`POST /pedidos/:pedidoId/escenas`, body crudo con `Content-Type: application/x-teowin-3d`, `?nombre=…&archivo=…`) y el backend lo **interpreta al subirlo** (`parser/escena-3d.parser.ts`): paneles (`taulerv/h/f`), extrusiones rectangulares (tapas, tiradores), caras de pared interiores y contorno del suelo, en mm (X ancho, Y alto, Z profundidad). Las medidas son expresiones que se evalúan con un evaluador propio (`parser/expresion.ts`, sin `eval`), que también resuelve las condiciones `invisibilidad(...)`; las piezas con `nuncavis3d`, con `transp(0)` o invisibles según las medidas del mueble no se incluyen. Los espesores (`mymat`, `GRxx = "matxx"`) se toman del `matTablero` de cada pieza. Detalle del formato y límites: `diseño.md` §13.
+- **Validación**: máximo 40 MB; el contenido tiene que empezar con `//version` (no se confía en la extensión ni en el tipo declarado) y la escena debe tener al menos un mueble o una pared (`400` / `422` si no).
+- **Se guardan los dos**: el `.3d` original (`contenido`) para poder re-interpretarlo cuando mejore el parser, y el JSON interpretado (`escena`) que consume el visor. Los listados nunca traen ninguno de los dos.
+- **Enlace con módulos**: cada mueble de la escena lleva el `idEscena` de `modulo.idEscena`.
+- **Solo lectura**: no hay anotaciones. Permisos: `documentacion.ver` para listar y ver; `documentacion.gestionar` para subir y eliminar (borrado lógico). No se agregó ningún permiso.
+- **Orden o pedido eliminado**: la escena deja de ser accesible (`404`), igual que el resto de la documentación.
+- **Animaciones**: el intérprete detecta los cajones (`seabre`), las hojas corredizas (`corredera`, `opened`) y las puertas con bisagra (`anguloAper`) de los muebles de fábrica y emite `animaciones[]` (tipo, eje, recorrido en mm o grados) y, en cada caja o malla, el índice `a` de su grupo; los catálogos de decoración y equipamiento no se animan (`diseño.md` §13.4 y §13.6).
+- **Texturas** (`texturas-3d`): al subir una escena, el backend copia a la tabla `textura_3d` la textura de cada material (`escena.materiales`, como `catálogo/código`) desde `TEOWIN_3D_DIR`; si el disco no responde, la carga de la escena **no falla**. Los colores de un mueble se buscan en el catálogo del mueble (4 Placares, 3 Cocinas); paredes y piso, en el 641 (decoración). El visor pide cada textura por `GET /api/texturas-3d/:catalogo/:material` (se copia sola la primera vez). Detalle y límites: `diseño.md` §13.5.
+- Subir `PARSER_VERSION` cuando cambie el formato de salida del intérprete y rehacer las escenas guardadas con `npm run escenas3d:reinterpretar`. La salida incluye `cajas`, `mallas` (cortinas, tubos, bachas…), `paredes` (con huecos) y `animaciones`. Los objetos `esBiblioteca` se leen de `TEOWIN_3D_DIR` (solo lectura). `npm run escenas3d:probar -- <carpeta>` prueba el intérprete contra copias de `.3d` sin tocar la base.
 
 ### 9. Usuarios, roles y permisos
 
@@ -459,6 +479,22 @@ Mismo esquema que las hojas de corte, colgando del pedido.
 | `GET /planos-pedido/:id/archivo` · `DELETE /planos-pedido/:id` | Descargar (con su `Content-Type`) / borrado lógico | |
 | `GET`/`POST /planos-pedido/:id/anotaciones` · `DELETE /planos-pedido/:id/anotaciones/:anotacionId` | Anotaciones del plano (una imagen es un documento de una sola página) | mismo contrato (campo `plano_pedido_id`) |
 
+### Escenas 3D de un pedido
+
+| Método y ruta | Qué hace | Body / respuesta |
+|---|---|---|
+| `GET /pedidos/:pedidoId/escenas` | Lista las escenas del pedido (sin el archivo ni la geometría) | `data`: array de `{ id, pedido_id, nombre, nombre_archivo, tamano, creado_en }` |
+| `POST /pedidos/:pedidoId/escenas?nombre=...&archivo=...` | Sube e interpreta un `.3d` (regla 10). **Body: el archivo crudo** con `Content-Type: application/x-teowin-3d` | `data`: la escena creada. `400` (no es un `.3d`), `404` (pedido), `413` (más de 40 MB), `415` (falta el body), `422` (sin muebles ni paredes) |
+| `GET /escenas-pedido/:id/escena` | Geometría interpretada para el visor | `data`: `{ nombre, escena: { version, cabecera, modulos[], cajas[], paredes[], suelo[], sinResolver[] } }` |
+| `DELETE /escenas-pedido/:id` | Borrado lógico | `data: null` |
+
+### Texturas de escenas 3D
+
+| Método y ruta | Qué hace | Body / respuesta |
+|---|---|---|
+| `GET /texturas-3d/:catalogo/:material` | Imagen de la textura del material en ese catálogo (`documentacion.ver`). La copia desde la carpeta de TeoWin la primera vez | binario `image/jpeg` o `image/png`. `404` si no existe |
+| `POST /texturas-3d/:catalogo/:material` | Alta o reemplazo manual (`documentacion.gestionar`). **Body: la imagen cruda** (`image/jpeg` o `image/png`, máx. 8 MB, se verifica la firma) | `data`: `{ clave, tamano }` |
+
 ### Piezas
 
 | Método y ruta | Qué hace | Body / respuesta |
@@ -505,6 +541,8 @@ El script [`prisma/teowin-readonly-login.sql`](prisma/teowin-readonly-login.sql)
 | `409 Conflict` ("ya existe un registro activo") al sincronizar una orden que **sí** aparece en el listado de la app | Ya existe una fila activa con ese `codigoOrdenFabricacion` en la base propia | Es el comportamiento esperado — para recargarla hay que eliminarla primero (botón "Eliminar" del listado) |
 | `409 Conflict` al sincronizar una orden que **no** aparece en ningún lado de la app (nunca se sincronizó) | `tArticuloDescripciones` puede tener más de una fila para el mismo familia/articulo/idioma con distinto `idCatalogo` — sin filtrar por `idCatalogo` en el join de descripción (`src/modules/sync/teowin-orden.queries.ts`), se duplican filas y dos piezas con el mismo `idUnico` terminan en el mismo `INSERT`, lo que dispara el índice único de la sección 8.3 con un mensaje engañoso ("ya existe") aunque la orden nunca se llegó a crear | Ya corregido (el join ahora exige `ad.idCatalogo = d.idCatalogo`/`= padre.idCatalogo`) — si vuelve a aparecer con otra orden, correr la query de `fetchOrdenDespiece` a mano y comparar el conteo de filas con/sin ese join |
 | Un módulo muestra menos piezas que el escandallo de TeoWin | Familia de corte que no estaba en el filtro (caso real: los paneles `PZPP/PAN` del módulo 38 del pedido `26-02149`, 40 en vez de 42) o órdenes sincronizadas antes de la corrección | El filtro ahora sale de `tFamiliasListadosFabricacion` (listado `A02`, catálogo 4). Para órdenes ya cargadas hay que completarlas (solo agregando filas) o eliminarlas y volver a agregarlas — ver la regla 1 |
+| Una escena 3D se ve con colores lisos en vez de texturas | El backend no llega a la carpeta de TeoWin (`TEOWIN_3D_DIR`, por defecto `T:/datos/3d/E_50`) y esa textura todavía no está en la base | Verificar que el disco esté disponible para el usuario que corre el backend (un servicio de Windows no ve las unidades mapeadas: usar ruta UNC) o subir la textura a mano (`POST /texturas-3d/...`). Se copia sola la primera vez que se la encuentra |
+| Una escena 3D se ve incompleta (faltan tiradores, ventanas o alguna pieza) | v1 del intérprete: no cubre `tube` ni `malla` (los perfiles de relieve se dibujan como su caja envolvente), y usa 18 mm donde el espesor depende del catálogo | Ver los límites en `diseño.md` §13.3; la escena se puede re-interpretar desde el original guardado cuando mejore el parser |
 | `prisma generate` falla con `EPERM: operation not permitted, rename ...query_engine-windows.dll.node` | El backend (`npm run dev`, `tsx watch`) está corriendo y tiene la DLL de Prisma abierta | Detené el backend, corré `npx prisma generate` y volvelo a levantar |
 | Subir un PDF o plano falla con `413` | Supera los 40 MB | Reducir el archivo; el límite está en `MAX_PDF_BYTES` / `MAX_PLANO_BYTES` |
 | El backend no arranca: `SESSION_SECRET debe tener al menos 16 caracteres` | Falta completar esa variable en `.env` (es obligatoria desde la feature de usuarios) | Generá un valor aleatorio largo (ver [Variables de entorno](#variables-de-entorno)) |

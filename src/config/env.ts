@@ -23,6 +23,10 @@ const envSchema = z.object({
   TEOWIN_DB_PASSWORD: optionalString(),
   TEOWIN_DB_ENCRYPT: z.coerce.boolean().default(true),
   TEOWIN_DB_TRUST_SERVER_CERTIFICATE: z.coerce.boolean().default(true),
+  // Carpeta de datos 3D de TeoWin (solo lectura): de ahí se copian las texturas de las escenas 3D
+  // (diseño.md §13). Por defecto T:/datos/3d/E_50. Si el disco no está, las escenas se ven con
+  // colores lisos (o con las texturas ya copiadas a la base).
+  TEOWIN_3D_DIR: optionalString(),
   // Autenticación por PIN (diseño.md §12). SESSION_SECRET firma la sesión: cambiarla solo
   // cierra las sesiones abiertas.
   SESSION_SECRET: z.string().min(16, "SESSION_SECRET debe tener al menos 16 caracteres."),

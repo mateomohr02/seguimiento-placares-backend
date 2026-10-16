@@ -81,6 +81,7 @@ model Pedido {
   modulos    Modulo[]
   documentos DocumentoPedido[]
   planos     PlanoPedido[]
+  escenas    EscenaPedido[]
 
   @@map("pedido")
 }
@@ -324,4 +325,42 @@ model Usuario {
 
   @@index([rol_id])
   @@map("usuario")
+}
+
+// Escenas 3D de un pedido (archivo .3d de TeoWin) — feature/visor-escenas-3d. Solo
+// lectura: el .3d original se guarda tal cual (`contenido`, bytea) para poder
+// re-interpretarlo si mejora el parser, y la geometría ya interpretada vive en
+// `escena` (JSON liviano que consume el visor). Sin anotaciones. Borrado lógico.
+model EscenaPedido {
+  id             String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  pedido_id      String    @db.Uuid
+  nombre         String
+  nombre_archivo String
+  tamano         Int
+  contenido      Bytes
+  escena         Json
+  parser_version Int
+  creado_en      DateTime  @default(now())
+  eliminado_en   DateTime?
+
+  pedido Pedido @relation(fields: [pedido_id], references: [id])
+
+  @@index([pedido_id])
+  @@map("escena_pedido")
+}
+
+// Texturas de los materiales de las escenas 3D (colores de fábrica y decoración) — se copian
+// una vez desde la carpeta de TeoWin (TEOWIN_3D_DIR) o se suben a mano, así el visor no depende de
+// ese disco. `clave` es el código del material en minúsculas y sin el prefijo <n> (ver
+// normalizarClave). Tabla aparte, aditiva.
+model Textura3D {
+  clave     String   @id
+  nombre    String
+  mime      String
+  tamano    Int
+  contenido Bytes
+  origen    String
+  creado_en DateTime @default(now())
+
+  @@map("textura_3d")
 }
