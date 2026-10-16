@@ -10,7 +10,7 @@ const MAX_BYTES = 20 * 1024 * 1024;
 
 /** Texto del `.3d` de la biblioteca, o null si no existe (disco no disponible, nombre raro, muy grande). */
 export function leerBibliotecaTeoWin(catalogo: string, familia: string, nombre: string): string | null {
-  if (!/^\d{1,4}$/.test(catalogo) || !SEGURO.test(familia) || !SEGURO.test(nombre)) return null;
+  if (!/^\d{1,6}$/.test(catalogo) || !SEGURO.test(familia) || !SEGURO.test(nombre)) return null;
   try {
     const raiz = env.TEOWIN_3D_DIR ?? "T:/datos/3d/E_50";
     const archivo = path.join(raiz, catalogo, "Catalogo", familia, `${nombre}.3d`);
