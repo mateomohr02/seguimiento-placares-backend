@@ -11,7 +11,7 @@ import { evaluar, grupos, oculto, type Entorno } from "./expresion";
 // base, así se puede re-interpretar).
 type Vec3 = [number, number, number];
 
-export const PARSER_VERSION = 27;
+export const PARSER_VERSION = 29;
 
 export interface CajaEscena {
   /** idEscena del módulo al que pertenece (null = no asociada). */
@@ -42,6 +42,8 @@ export interface AnimacionEscena {
   mod: number | null;
   /** Solo `giro` (puerta con bisagra): punto del eje de la bisagra, en el sistema de la escena. */
   pivote?: [number, number, number];
+  /** Desplazamiento inicial (mm) sobre `eje`: la pieza se guardó abierta y se muestra cerrada (parte de `ini` y llega a `dist`). */
+  ini?: number;
   /** Dirección del desplazamiento, o eje de giro (vector unitario, en el sistema de la escena). */
   eje: [number, number, number];
   /** Recorrido de apertura en mm (en `giro`: ángulo en grados, con signo). */
@@ -191,6 +193,8 @@ class Nodo {
   orient: number | null = null;
   /** Marca `esAtrezzo`: pieza decorativa real aunque no tenga material (tiras LED). */
   atrezzo = false;
+  /** Marca `opened`: la hoja se guardó ABIERTA (su desplazamiento en el .3d es el de apertura); cerrada vale 0. */
+  abierto = false;
   /** Marca `esBiblioteca`: la geometría está en el archivo del catálogo de TeoWin, no en la escena. */
   biblioteca = false;
   bibliotecaCargada = false;
@@ -221,6 +225,9 @@ function tileDeCad(t: string): [number, number] | null {
 }
 
 // "objpath" es el volumen del hueco que la puerta de paso abre en la pared y "objformapath" el marco de cada hoja (un sólido sin el hueco, que no se puede restar): no se dibujan.
+// Catálogos de TeoWin cuyos objetos no se animan (decoración y equipamiento; 522 es la versión anterior de 658).
+const SIN_ANIMACION = new Set(["636", "637", "638", "640", "641", "646", "647", "648", "649", "650", "651", "652", "653", "654", "655", "656", "658", "522"]);
+
 const NODOS_IGNORADOS = new Set(["mecanizado", "label", "defespigameca", "objpath", "RECORTA-PARED", "RECORTA_PARED"]);
 
 const ATTR = /^(eti"|mat"|color\()/;
@@ -517,6 +524,7 @@ function parsearArbol(texto: string): Nodo {
       if (/\bseabre\b/.test(t)) o.seAbre = true;
       if (/\bcorredera\b/.test(t)) o.corredera = true;
       if (/\besAtrezzo\b/.test(t)) o.atrezzo = true;
+      if (/\bopened\b/.test(t)) o.abierto = true;
       if (/\besBiblioteca\b/.test(t)) o.biblioteca = true;
       const aa = /\banguloAper\((\d+(?:\.\d+)?)\)/.exec(t);
       if (aa) o.anguloAper = Number(aa[1]);
@@ -855,7 +863,8 @@ export function interpretarEscena3D(texto: string, opciones: OpcionesInterprete 
     marcoPadre: { M: Mat3; T: Vec3; L: number } | null = null,
   ) => {
     // Las patas (objeti PAT) quedan bajo el zócalo y TeoWin no las muestra desde afuera: no se dibujan.
-    if (NODOS_IGNORADOS.has(n.nombre) || n.nuncaVisible || n.objeti === "PAT") return;
+    // Las fuentes de luz (objeti LZ: el cono amarillo de una lámpara) no se dibujan: TeoWin solo muestra la lámpara.
+    if (NODOS_IGNORADOS.has(n.nombre) || n.nuncaVisible || n.objeti === "PAT" || n.objeti === "LZ") return;
     // Objeto de la biblioteca de TeoWin (atrezzo) sin geometría en la escena: se toma del archivo del catálogo.
     if (n.biblioteca && !n.bibliotecaCargada && opciones.biblioteca && !tieneGeometria(n)) {
       n.bibliotecaCargada = true;
@@ -936,8 +945,11 @@ export function interpretarEscena3D(texto: string, opciones: OpcionesInterprete 
 
     // Animación (solo muebles): un cajón (`seabre`) se desliza hacia el frente el porcenAperOpn de su
     // profundidad; una hoja `corredera` más angosta que el mueble corre hacia el otro extremo.
-    let anim = animPadre;
-    if (enModulo) {
+    // Los catálogos de decoración y equipamiento (encimeras, electrodomésticos, puertas y ventanas, lámparas…)
+    // no se animan: ni se mueven solos ni acompañan a un mueble que se abre.
+    const sinAnim = SIN_ANIMACION.has(cat);
+    let anim = sinAnim ? null : animPadre;
+    if (enModulo && !sinAnim) {
       if (n.seAbre && enCorr && envPadre.L !== undefined && env.L !== undefined && envPadre.L - env.L >= 1) {
         // Hoja de una puerta de paso corrediza: corre en el plano de la puerta (X), no hacia el frente.
         const sentido = pos[0] + env.L / 2 < envPadre.L / 2 ? 1 : -1;
@@ -973,7 +985,14 @@ export function interpretarEscena3D(texto: string, opciones: OpcionesInterprete 
         const e = apply(M, [0, 0, 1]);
         out.animaciones.push({ tipo: "cajon", mod: id, eje: [r4(e[0]), r4(e[1]), r4(e[2])], dist: r1((n.porcen ?? 0.85) * env.P) });
         anim = out.animaciones.length - 1;
-      } else if (n.corredera && envPadre.L !== undefined && env.L !== undefined && env.L < envPadre.L - 1) {
+      } else if (n.abierto && Math.abs(pos[0]) >= 100) {
+        // Hoja corrediza de un placard guardada abierta (`opened`): el desplazamiento de su `virtual` es el de apertura
+        // (porcenAperOpn × recorrido) y cerrada vale 0. Se muestra cerrada y se anima hasta su posición guardada.
+        const largo = Math.abs(pos[0]);
+        const e = apply(M, [Math.sign(pos[0]), 0, 0]);
+        out.animaciones.push({ tipo: "puerta", mod: id, eje: [r4(e[0]), r4(e[1]), r4(e[2])], dist: 0, ini: -r1(largo) });
+        anim = out.animaciones.length - 1;
+      } else if (n.corredera && !n.kids.some((k) => k.abierto) && envPadre.L !== undefined && env.L !== undefined && env.L < envPadre.L - 1) {
         const sentido = pos[0] + env.L / 2 < envPadre.L / 2 ? 1 : -1;
         const e = apply(M, [sentido, 0, 0]);
         const dist = (buscarPorcen(n) ?? 0.85) * (envPadre.L - env.L);
