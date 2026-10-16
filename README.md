@@ -154,7 +154,7 @@ Vas a ver `Backend escuchando en puerto 4000`. Dejá esa terminal abierta mientr
 
 > **Antes de usar la app tenés que cargar al menos un usuario**: la migración de usuarios crea los roles y permisos pero **ningún usuario**, y sin sesión todo responde `401`. Ver [Alta de usuarios](#alta-de-usuarios).
 
-> Las migraciones de la documentación digital (`hoja_corte`, `documento_pedido`, `plano_pedido` y sus anotaciones) solo **agregan** tablas. Para revertir una, ejecutá su `down.sql` (en `prisma/migrations/<nombre>/`) y borrá su fila de `_prisma_migrations`.
+> Las migraciones de la documentación digital (`hoja_corte`, `documento_pedido`, `plano_pedido` y sus anotaciones) y las de las escenas 3D (`escena_pedido`, `textura_3d`) solo **agregan** tablas. Para revertir una, ejecutá su `down.sql` (en `prisma/migrations/<nombre>/`) y borrá su fila de `_prisma_migrations`.
 
 Otros comandos útiles:
 
@@ -342,9 +342,9 @@ Antes había botones y endpoints manuales para finalizar módulos y pedidos y pa
 - **Enlace con módulos**: cada mueble de la escena lleva el `idEscena` de `modulo.idEscena`.
 - **Solo lectura**: no hay anotaciones. Permisos: `documentacion.ver` para listar y ver; `documentacion.gestionar` para subir y eliminar (borrado lógico). No se agregó ningún permiso.
 - **Orden o pedido eliminado**: la escena deja de ser accesible (`404`), igual que el resto de la documentación.
-- **Animaciones**: el intérprete detecta los cajones (`seabre`) y las hojas `corredera` y emite `animaciones[]` (tipo, eje, recorrido en mm) y, en cada caja, el índice `a` de su grupo (`diseño.md` §13.4).
+- **Animaciones**: el intérprete detecta los cajones (`seabre`), las hojas corredizas (`corredera`, `opened`) y las puertas con bisagra (`anguloAper`) de los muebles de fábrica y emite `animaciones[]` (tipo, eje, recorrido en mm o grados) y, en cada caja o malla, el índice `a` de su grupo; los catálogos de decoración y equipamiento no se animan (`diseño.md` §13.4 y §13.6).
 - **Texturas** (`texturas-3d`): al subir una escena, el backend copia a la tabla `textura_3d` la textura de cada material (`escena.materiales`, como `catálogo/código`) desde `TEOWIN_3D_DIR`; si el disco no responde, la carga de la escena **no falla**. Los colores de un mueble se buscan en el catálogo del mueble (4 Placares, 3 Cocinas); paredes y piso, en el 641 (decoración). El visor pide cada textura por `GET /api/texturas-3d/:catalogo/:material` (se copia sola la primera vez). Detalle y límites: `diseño.md` §13.5.
-- Subir `PARSER_VERSION` cuando cambie el formato de salida del intérprete.
+- Subir `PARSER_VERSION` cuando cambie el formato de salida del intérprete y rehacer las escenas guardadas con `npm run escenas3d:reinterpretar`. La salida incluye `cajas`, `mallas` (cortinas, tubos, bachas…), `paredes` (con huecos) y `animaciones`. Los objetos `esBiblioteca` se leen de `TEOWIN_3D_DIR` (solo lectura). `npm run escenas3d:probar -- <carpeta>` prueba el intérprete contra copias de `.3d` sin tocar la base.
 
 ### 9. Usuarios, roles y permisos
 
