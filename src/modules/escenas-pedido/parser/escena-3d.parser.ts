@@ -11,7 +11,7 @@ import { evaluar, grupos, oculto, type Entorno } from "./expresion";
 // base, así se puede re-interpretar).
 type Vec3 = [number, number, number];
 
-export const PARSER_VERSION = 26;
+export const PARSER_VERSION = 27;
 
 export interface CajaEscena {
   /** idEscena del módulo al que pertenece (null = no asociada). */
@@ -32,6 +32,8 @@ export interface CajaEscena {
   o?: number;
   /** Catálogo de la pieza cuando no es el 4 (ej. 658 = puertas, 3 = cocinas): define dónde buscar su textura. */
   k?: string;
+  /** Foto de paisaje (`eti"PSJ"`): la imagen entera cubre la cara y se ve sin sombras. */
+  p?: 1;
 }
 
 /** Grupo de piezas que se desplazan juntas: un cajón que se abre o una hoja corrediza. */
@@ -134,6 +136,8 @@ interface Primitiva {
   ang: string[] | null;
   /** Línea `eti""` (sin etiqueta): en una encimera es el hueco de la bacha o la hornalla, no se dibuja. */
   sinEti: boolean;
+  /** Etiqueta de la línea (`eti"PSJ"`): PSJ es la foto de paisaje que se ve a través de una abertura. */
+  etiqueta: string;
 }
 
 /** Malla leída del .3d, todavía sin compactar. */
@@ -578,6 +582,7 @@ function parsearArbol(texto: string): Nodo {
           raw: cuerpo,
           ang: angPrim,
           sinEti: /(?:^|\s)eti""/.test(completa),
+          etiqueta: /eti"([^"]*)"/.exec(completa)?.[1] ?? "",
         });
       }
     } else if (/^(malla|caras|texcoord)\(/.test(t)) {
@@ -719,6 +724,11 @@ function buscarHueco(n: Nodo): Nodo | null {
 }
 
 /** ¿El nodo o algún descendiente trae geometría propia (primitivas o mallas)? */
+/** El `.3d` de TeoWin trae algunos nombres con el carácter de reemplazo (EF BF BD) en lugar de la tilde. */
+function limpiarTexto(t: string): string {
+  return t.replace(/Lï¿½mpara/g, "Lámpara").replace(/ï¿½/g, "?");
+}
+
 function tieneGeometria(n: Nodo): boolean {
   return n.prims.length > 0 || n.meshes.length > 0 || n.kids.some(tieneGeometria);
 }
@@ -1122,6 +1132,7 @@ export function interpretarEscena3D(texto: string, opciones: OpcionesInterprete 
           ...(anim !== null ? { a: anim } : {}),
           ...(pr.opacidad !== null ? { o: pr.opacidad } : {}),
           ...(cat !== "4" ? { k: cat } : {}),
+          ...(pr.etiqueta === "PSJ" ? { p: 1 as const } : {}),
         });
       }
     }
@@ -1151,8 +1162,8 @@ export function interpretarEscena3D(texto: string, opciones: OpcionesInterprete 
       }
       out.modulos.push({
         idEscena: k.idEscena,
-        nombre: k.nombreModulo || k.nombre,
-        familia: k.familia || k.nombre,
+        nombre: limpiarTexto(k.nombreModulo || k.nombre),
+        familia: limpiarTexto(k.familia || k.nombre),
         catalogo: k.catalogo,
         frente: frenteDe(k),
         dim: [env.L ?? 0, env.H ?? 0, env.P ?? 0],

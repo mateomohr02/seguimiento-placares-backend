@@ -22,7 +22,7 @@ export function normalizarClave(material: string): string {
 // 641 pavimentos y revestimientos, 646 alfombras, 647 cuadros y espejos, 648-651 y 656 decoración,
 // 652 lámparas, 653 sofás, 654 mesas y sillas, 655 animaciones, 658 puertas y ventanas). Cada uno tiene una
 // carpeta plana de colores (rápida de listar) y un árbol de texturas (se indexa una sola vez).
-const CATALOGOS = ["4", "3", "658", "641", "636", "637", "638", "640", "646", "647", "648", "649", "650", "651", "652", "653", "654", "655", "656"];
+const CATALOGOS = ["4", "3", "658", "522", "522", "522", "522", "641", "636", "637", "638", "640", "646", "647", "648", "649", "650", "651", "652", "653", "654", "655", "656"];
 const DIRS: Record<string, { planas: string[]; arboles: string[] }> = Object.fromEntries(
   CATALOGOS.map((c) => [c, { planas: [`${c}/Colores`, `Showroom/${c}/colores`], arboles: [`${c}/Texturas`] }]),
 );
