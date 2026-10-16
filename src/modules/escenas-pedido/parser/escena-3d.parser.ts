@@ -11,7 +11,7 @@ import { evaluar, grupos, oculto, type Entorno } from "./expresion";
 // base, así se puede re-interpretar).
 type Vec3 = [number, number, number];
 
-export const PARSER_VERSION = 24;
+export const PARSER_VERSION = 25;
 
 export interface CajaEscena {
   /** idEscena del módulo al que pertenece (null = no asociada). */
@@ -842,6 +842,7 @@ export function interpretarEscena3D(texto: string, opciones: OpcionesInterprete 
     animPadre: number | null,
     catPadre: string,
     enCorr = false,
+    marcoPadre: { M: Mat3; T: Vec3; L: number } | null = null,
   ) => {
     // Las patas (objeti PAT) quedan bajo el zócalo y TeoWin no las muestra desde afuera: no se dibujan.
     if (NODOS_IGNORADOS.has(n.nombre) || n.nuncaVisible || n.objeti === "PAT") return;
@@ -920,6 +921,8 @@ export function interpretarEscena3D(texto: string, opciones: OpcionesInterprete 
     const d0 = apply(M, pos);
     const T2: Vec3 = [T[0] + d0[0], T[1] + d0[1], T[2] + d0[2]];
     const id = n.idEscena ?? idEscena;
+    // Marco del mueble (el objeto con su propio idEscena): las bisagras se resuelven respecto de él.
+    const marco = n.idEscena !== null && env.L !== undefined ? { M: M2, T: T2, L: env.L } : marcoPadre;
 
     // Animación (solo muebles): un cajón (`seabre`) se desliza hacia el frente el porcenAperOpn de su
     // profundidad; una hoja `corredera` más angosta que el mueble corre hacia el otro extremo.
@@ -933,19 +936,27 @@ export function interpretarEscena3D(texto: string, opciones: OpcionesInterprete 
         out.animaciones.push({ tipo: "puerta", mod: id, eje: [r4(e[0]), r4(e[1]), r4(e[2])], dist: r1(dist) });
         anim = out.animaciones.length - 1;
       } else if (n.anguloAper !== null && envPadre.L !== undefined && env.L !== undefined && env.L > 0 && env.H > 0) {
-        // Puerta con bisagra: gira sobre el canto de su lado exterior (la bisagra está del lado del mueble
-        // al que pertenece la hoja) hacia el frente (+Z local del mueble).
-        const derecha = pos[0] + env.L / 2 > envPadre.L / 2 + 1;
-        const lp: Vec3 = [derecha ? env.L : 0, 0, 0];
-        const d = apply(M2, lp);
-        const eje = apply(M2, [0, 1, 0]);
+        // Puerta con bisagra: gira sobre el canto exterior de la mitad del mueble en que está la hoja, hacia el
+        // frente (+Z del mueble). Se resuelve en la escena (no en el sistema de la hoja): una hoja derecha de un
+        // mueble de cocina suele estar girada 180° y sus ejes locales quedan al revés.
+        const mk = marco ?? { M, T, L: envPadre.L };
+        const ejeX = apply(mk.M, [1, 0, 0]);
+        const xPar = (p: Vec3) => (p[0] - mk.T[0]) * ejeX[0] + (p[1] - mk.T[1]) * ejeX[1] + (p[2] - mk.T[2]) * ejeX[2];
+        const dB = apply(M2, [env.L, 0, 0]);
+        const pA: Vec3 = T2;
+        const pB: Vec3 = [T2[0] + dB[0], T2[1] + dB[1], T2[2] + dB[2]];
+        const xa = xPar(pA);
+        const xb = xPar(pB);
+        const izquierda = (xa + xb) / 2 <= mk.L / 2 + 1;
+        const bisagra = izquierda ? (xa <= xb ? pA : pB) : xa >= xb ? pA : pB;
+        const eje = apply(mk.M, [0, 1, 0]);
         const grados = n.anguloAper * (buscarPorcen(n) ?? 0.85);
         out.animaciones.push({
           tipo: "giro",
           mod: id,
           eje: [r4(eje[0]), r4(eje[1]), r4(eje[2])],
-          pivote: rv([T2[0] + d[0], T2[1] + d[1], T2[2] + d[2]]),
-          dist: r1(derecha ? grados : -grados),
+          pivote: rv(bisagra),
+          dist: r1(izquierda ? -grados : grados),
         });
         anim = out.animaciones.length - 1;
       } else if (n.seAbre && env.P > 0) {
@@ -1125,7 +1136,7 @@ export function interpretarEscena3D(texto: string, opciones: OpcionesInterprete 
         emitirMalla({ v: mc.v, i: mc.i, uv: mc.uv }, { m: mc.m, c: mc.c, opacidad: mc.opacidad }, M2, T2, id, anim, cat, n.nombre);
       }
     }
-    for (const k of n.kids) caminar(k, env, M2, T2, id, enModulo, anim, cat, enCorr || n.corredera);
+    for (const k of n.kids) caminar(k, env, M2, T2, id, enModulo, anim, cat, enCorr || n.corredera, marco);
   };
 
   for (const k of escena.kids) {
