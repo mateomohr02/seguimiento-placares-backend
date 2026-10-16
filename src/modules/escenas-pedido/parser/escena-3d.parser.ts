@@ -11,7 +11,7 @@ import { evaluar, grupos, oculto, type Entorno } from "./expresion";
 // base, así se puede re-interpretar).
 type Vec3 = [number, number, number];
 
-export const PARSER_VERSION = 25;
+export const PARSER_VERSION = 26;
 
 export interface CajaEscena {
   /** idEscena del módulo al que pertenece (null = no asociada). */
@@ -928,7 +928,7 @@ export function interpretarEscena3D(texto: string, opciones: OpcionesInterprete 
     // profundidad; una hoja `corredera` más angosta que el mueble corre hacia el otro extremo.
     let anim = animPadre;
     if (enModulo) {
-      if (n.seAbre && enCorr && envPadre.L !== undefined && env.L !== undefined) {
+      if (n.seAbre && enCorr && envPadre.L !== undefined && env.L !== undefined && envPadre.L - env.L >= 1) {
         // Hoja de una puerta de paso corrediza: corre en el plano de la puerta (X), no hacia el frente.
         const sentido = pos[0] + env.L / 2 < envPadre.L / 2 ? 1 : -1;
         const e = apply(M, [sentido, 0, 0]);
@@ -959,7 +959,7 @@ export function interpretarEscena3D(texto: string, opciones: OpcionesInterprete 
           dist: r1(izquierda ? -grados : grados),
         });
         anim = out.animaciones.length - 1;
-      } else if (n.seAbre && env.P > 0) {
+      } else if (n.seAbre && !enCorr && env.P > 0) {
         const e = apply(M, [0, 0, 1]);
         out.animaciones.push({ tipo: "cajon", mod: id, eje: [r4(e[0]), r4(e[1]), r4(e[2])], dist: r1((n.porcen ?? 0.85) * env.P) });
         anim = out.animaciones.length - 1;
@@ -1136,7 +1136,7 @@ export function interpretarEscena3D(texto: string, opciones: OpcionesInterprete 
         emitirMalla({ v: mc.v, i: mc.i, uv: mc.uv }, { m: mc.m, c: mc.c, opacidad: mc.opacidad }, M2, T2, id, anim, cat, n.nombre);
       }
     }
-    for (const k of n.kids) caminar(k, env, M2, T2, id, enModulo, anim, cat, enCorr || n.corredera, marco);
+    for (const k of n.kids) caminar(k, env, M2, T2, id, enModulo, anim, cat, enCorr || (n.corredera && n.objeti === "PT"), marco);
   };
 
   for (const k of escena.kids) {
