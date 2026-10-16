@@ -1,3 +1,4 @@
+import earcut from "earcut";
 import { evaluar, grupos, oculto, type Entorno } from "./expresion";
 
 // Intérprete (solo lectura) de los .3d de TeoWin — diseño.md §13. Devuelve una
@@ -8,7 +9,9 @@ import { evaluar, grupos, oculto, type Entorno } from "./expresion";
 // mueven (cajones y hojas corredizas) para animarlas, y los materiales de paredes y piso.
 // Subir PARSER_VERSION cuando cambie la salida (el original se conserva en la
 // base, así se puede re-interpretar).
-export const PARSER_VERSION = 20;
+type Vec3 = [number, number, number];
+
+export const PARSER_VERSION = 24;
 
 export interface CajaEscena {
   /** idEscena del módulo al que pertenece (null = no asociada). */
@@ -73,6 +76,8 @@ export interface ParedEscena {
   m?: string;
   /** Medida (mm) de la baldosa del revestimiento (patrón `enrajolat`): la textura entera cubre una baldosa. */
   t?: [number, number];
+  /** Cara de un tabique o una columna: se dibuja de los dos lados (no mira al centro del cuarto). */
+  d?: 1;
   /** Huecos de la cara (puertas de paso), como [x0, y0, x1, y1] en mm sobre la cara: x desde el vértice 0 hacia el 1, y hacia arriba. */
   h?: [number, number, number, number][];
 }
@@ -127,6 +132,8 @@ interface Primitiva {
   raw: string;
   /** `ang(x,y,z)` intercalado en una extrusión (zócalos): la gira sobre su desplazamiento. */
   ang: string[] | null;
+  /** Línea `eti""` (sin etiqueta): en una encimera es el hueco de la bacha o la hornalla, no se dibuja. */
+  sinEti: boolean;
 }
 
 /** Malla leída del .3d, todavía sin compactar. */
@@ -176,6 +183,15 @@ class Nodo {
   meshes: MallaCruda[] = [];
   /** `idrep(n)`: número de repetición del objeto en una serie (travesaños, listones): lo usan las fórmulas. */
   idrep: number | null = null;
+  /** `orient n`: plano de un contorno extruido (2 = planta); la cubeta de una bacha es orient 2. */
+  orient: number | null = null;
+  /** Marca `esAtrezzo`: pieza decorativa real aunque no tenga material (tiras LED). */
+  atrezzo = false;
+  /** Marca `esBiblioteca`: la geometría está en el archivo del catálogo de TeoWin, no en la escena. */
+  biblioteca = false;
+  bibliotecaCargada = false;
+  /** Contorno `camino(R)(0,0)(x,y,z)…` (losas de encimera que TeoWin genera desde el recorrido). */
+  camino: Vec3[] = [];
   /** Solo la raíz: `globalParam` de cada catálogo (`DatosCat(n)`), p. ej. Hz = altura del zócalo. */
   globales: Record<string, Record<string, string>> = {};
   mallaActual: MallaCruda | null = null;
@@ -201,11 +217,11 @@ function tileDeCad(t: string): [number, number] | null {
 }
 
 // "objpath" es el volumen del hueco que la puerta de paso abre en la pared y "objformapath" el marco de cada hoja (un sólido sin el hueco, que no se puede restar): no se dibujan.
-const NODOS_IGNORADOS = new Set(["mecanizado", "label", "defespigameca", "objpath", "objformapath"]);
+const NODOS_IGNORADOS = new Set(["mecanizado", "label", "defespigameca", "objpath", "RECORTA-PARED", "RECORTA_PARED"]);
 
 const ATTR = /^(eti"|mat"|color\()/;
-const PRIM = /\b(taulerv|taulerh|taulerf|extrudeSp|extrude|tubeSp|tube|revol|faceset|face)(\(.*)$/;
-const PRIM_LINEA = /^(taulerv|taulerh|taulerf|extrudeSp|extrude|tubeSp|tube|revol)\(/;
+const PRIM = /\b(taulerv|taulerh|taulerf|extrudeSp|extrude|tubeSp|tube|revolSp|revol|faceset|face|poly)(\(.*)$/;
+const PRIM_LINEA = /^(taulerv|taulerh|taulerf|extrudeSp|extrude|tubeSp|tube|revolSp|revol)\(/;
 
 /** Recorre los grupos `(...)` de una línea a partir de `desde`, sin armar arreglos intermedios. */
 function recorrerGrupos(s: string, desde: number, cb: (g: string) => void) {
@@ -345,6 +361,111 @@ function mallaDeTubo(pts: Vec3[], radios: number[]): { v: number[]; i: number[] 
   return { v, i: idx };
 }
 
+
+/**
+ * Prisma recto de un contorno plano: el eje en que el contorno no varía es el de extrusión (espesor `esp`).
+ * Triangula con earcut (soporta los contornos con huecos que TeoWin escribe como un único recorrido).
+ * `sinTapa` deja abierta la cara superior (cubetas de bachas). null si el contorno no es plano.
+ */
+function prismaDeContorno(P: Vec3[], esp: number, sinTapa = false): { v: number[]; i: number[] } | null {
+  const min: Vec3 = [Infinity, Infinity, Infinity];
+  const max: Vec3 = [-Infinity, -Infinity, -Infinity];
+  for (const p of P) {
+    for (let k = 0; k < 3; k++) {
+      min[k] = Math.min(min[k], p[k]);
+      max[k] = Math.max(max[k], p[k]);
+    }
+  }
+  const planos = [0, 1, 2].filter((k) => max[k] - min[k] < 1e-6);
+  if (planos.length !== 1) return null;
+  const eje = planos[0];
+  const [a, b] = [0, 1, 2].filter((k) => k !== eje);
+  const pts = P.length > 3 && P[0].every((x, j) => Math.abs(x - P[P.length - 1][j]) < 1e-6) ? P.slice(0, -1) : P;
+  if (pts.length < 3) return null;
+  const flat: number[] = [];
+  for (const p of pts) flat.push(p[a], p[b]);
+  const tri = earcut(flat);
+  if (tri.length < 3) return null;
+  const n = pts.length;
+  const v: number[] = [];
+  for (const h of [0, esp]) {
+    for (const p of pts) {
+      const q: Vec3 = [0, 0, 0];
+      q[a] = p[a];
+      q[b] = p[b];
+      q[eje] = p[eje] + h;
+      v.push(q[0], q[1], q[2]);
+    }
+  }
+  const idx: number[] = [];
+  for (let k = 0; k < tri.length; k += 3) {
+    idx.push(tri[k], tri[k + 1], tri[k + 2]);
+    if (!sinTapa) idx.push(n + tri[k], n + tri[k + 1], n + tri[k + 2]);
+  }
+  for (let k = 0; k < n; k++) {
+    const k2 = (k + 1) % n;
+    idx.push(k, k2, n + k, k2, n + k2, n + k);
+  }
+  return { v, i: idx };
+}
+
+/**
+ * `extrude`/`extrudeSp` con un contorno plano que no es un rectángulo alineado (marcos de abertura, bordes de
+ * bacha, perfiles con relieve) → prisma exacto en el sistema del objeto. null: se dibuja como caja.
+ */
+function prismaDePrimitiva(
+  pr: Primitiva,
+  n: Nodo,
+  env: Entorno,
+  ev: (e: string, env: Entorno) => number | null,
+  evVec: (g: string[] | undefined, env: Entorno) => Vec3 | null,
+): { v: number[]; i: number[] } | null {
+  const size = evVec(pr.args[0], env);
+  const off = evVec(pr.args[1], env);
+  if (!size || !off) return null;
+  const pts = pr.args.slice(2).filter((g) => g.length >= 3).map((g) => evVec(g, env));
+  if (pts.length < 3 || pts.some((q) => q === null)) return null;
+  let Q = pts as Vec3[];
+  const cierre = Q.findIndex((q, k) => k > 1 && q.every((x, j) => Math.abs(x - Q[0][j]) < 1e-6));
+  if (cierre > 1) Q = Q.slice(0, cierre + 1);
+  const min: Vec3 = [Infinity, Infinity, Infinity];
+  const max: Vec3 = [-Infinity, -Infinity, -Infinity];
+  for (const q of Q) {
+    for (let k = 0; k < 3; k++) {
+      min[k] = Math.min(min[k], q[k]);
+      max[k] = Math.max(max[k], q[k]);
+    }
+  }
+  const planos = [0, 1, 2].filter((k) => max[k] - min[k] < 1e-6);
+  if (planos.length !== 1) return null;
+  const eje = planos[0];
+  const [a, b] = [0, 1, 2].filter((k) => k !== eje);
+  const marco = n.nombre === "objformapath";
+  if (!marco) {
+    // Rectángulo alineado (o casi): la caja alcanza.
+    let area = 0;
+    for (let k = 0; k < Q.length; k++) {
+      const p = Q[k];
+      const q = Q[(k + 1) % Q.length];
+      area += p[a] * q[b] - q[a] * p[b];
+    }
+    const caja = (max[a] - min[a]) * (max[b] - min[b]);
+    if (caja <= 0 || Math.abs(area) / 2 / caja > 0.985) return null;
+  }
+  const esp = size[eje] > 0.5 ? size[eje] : ESPESOR_DEFECTO;
+  const sinTapa = marco && n.orient === 2 && eje === 1 && esp >= 50;
+  const pm = prismaDeContorno(Q, esp, sinTapa);
+  if (!pm) return null;
+  const R = pr.ang ? rotacion(...(pr.ang.slice(0, 3).map((x) => ev(x, env) ?? 0) as [number, number, number])) : ID3;
+  for (let k = 0; k < pm.v.length; k += 3) {
+    const q = apply(R, [pm.v[k], pm.v[k + 1], pm.v[k + 2]]);
+    pm.v[k] = q[0] + off[0];
+    pm.v[k + 1] = q[1] + off[1];
+    pm.v[k + 2] = q[2] + off[2];
+  }
+  return pm;
+}
+
 function parsearArbol(texto: string): Nodo {
   const raiz = new Nodo("ROOT");
   const pila: Nodo[] = [raiz];
@@ -391,6 +512,8 @@ function parsearArbol(texto: string): Nodo {
     if (!t.startsWith("eti")) {
       if (/\bseabre\b/.test(t)) o.seAbre = true;
       if (/\bcorredera\b/.test(t)) o.corredera = true;
+      if (/\besAtrezzo\b/.test(t)) o.atrezzo = true;
+      if (/\besBiblioteca\b/.test(t)) o.biblioteca = true;
       const aa = /\banguloAper\((\d+(?:\.\d+)?)\)/.exec(t);
       if (aa) o.anguloAper = Number(aa[1]);
       const po = /porcenAperOpn\(([\d.]+)\)/.exec(t);
@@ -406,7 +529,12 @@ function parsearArbol(texto: string): Nodo {
     else if (t.startsWith("virtual(")) o.virtual = grupos(t).slice(0, 2);
     else if (t.startsWith("ang(")) o.ang = grupos(t)[0] ?? null;
     else if (t.startsWith("pos(")) o.pos = grupos(t)[0] ?? null;
-    else if ((m = /^idEscena\((\d+)\)/.exec(t))) o.idEscena = Number(m[1]);
+    else if ((m = /(?:^|\s)idEscena\((\d+)\)/.exec(t))) o.idEscena = Number(m[1]);
+    else if ((m = /^camino\(R\)\([^)]*\)\(([^)]*)\)/.exec(t))) {
+      const q = m[1].split(",").map(Number);
+      if (q.length === 3 && q.every(Number.isFinite)) o.camino.push([q[0], q[1], q[2]]);
+    }
+    else if ((m = /^orient (\d)/.exec(t))) o.orient = Number(m[1]);
     else if ((m = /^idrep\((\d+)\)/.exec(t))) o.idrep = Number(m[1]);
     else if ((m = /^objeti"(\w*)"/.exec(t))) o.objeti = m[1];
     else if ((m = /^familia"(\w+)"/.exec(t))) o.familia = m[1];
@@ -430,7 +558,7 @@ function parsearArbol(texto: string): Nodo {
         const col = /color\(([\d.]+),([\d.]+),([\d.]+)\)/.exec(completa);
         let cuerpo = prim[2];
         let angPrim: string[] | null = null;
-        if (prim[1] === "extrude" || prim[1] === "extrudeSp") {
+        if (/^(extrude|extrudeSp|tube|tubeSp|revol|revolSp)$/.test(prim[1])) {
           const ma = /\bang\(([^)]*)\)/.exec(cuerpo);
           if (ma) {
             angPrim = ma[1].split(",");
@@ -447,8 +575,9 @@ function parsearArbol(texto: string): Nodo {
           opacidad: opacidadDe(completa),
           materialCad: /<MATERIAL>([^<]+)<\/MATERIAL>/.exec(completa)?.[1]?.trim() || null,
           tile: tileDeCad(completa),
-          raw: prim[2],
+          raw: cuerpo,
           ang: angPrim,
+          sinEti: /(?:^|\s)eti""/.test(completa),
         });
       }
     } else if (/^(malla|caras|texcoord)\(/.test(t)) {
@@ -474,7 +603,6 @@ function parsearArbol(texto: string): Nodo {
 }
 
 type Mat3 = number[]; // por filas, 9
-type Vec3 = [number, number, number];
 const ID3: Mat3 = [1, 0, 0, 0, 1, 0, 0, 0, 1];
 const mul = (a: Mat3, b: Mat3): Mat3 => {
   const r: number[] = [];
@@ -577,6 +705,24 @@ function frenteDe(k: Nodo): [number, number, number] {
   return [r4(f[0]), r4(f[1]), r4(f[2])];
 }
 
+// Volumen que la abertura (puerta, ventana, balconera) recorta en la pared: `objpath` (puertas, fijos,
+// balconeras) o `RECORTA-PARED` / `RECORTA_PARED` (ventanas corredizas, practicables); ambos llevan `recortaCamino`.
+// No es `HOLE`, que también lo lleva pero es un rebaje del panel de un mueble.
+const NOMBRES_HUECO = new Set(["objpath", "RECORTA-PARED", "RECORTA_PARED"]);
+function buscarHueco(n: Nodo): Nodo | null {
+  for (const k of n.kids) {
+    if (NOMBRES_HUECO.has(k.nombre) && k.prims.some((q) => q.tipo === "extrude" || q.tipo === "extrudeSp")) return k;
+    const x = buscarHueco(k);
+    if (x) return x;
+  }
+  return null;
+}
+
+/** ¿El nodo o algún descendiente trae geometría propia (primitivas o mallas)? */
+function tieneGeometria(n: Nodo): boolean {
+  return n.prims.length > 0 || n.meshes.length > 0 || n.kids.some(tieneGeometria);
+}
+
 function buscarNodo(n: Nodo, nombre: string): Nodo | null {
   for (const k of n.kids) {
     if (k.nombre === nombre) return k;
@@ -600,7 +746,12 @@ function buscarPorcen(n: Nodo): number | null {
 // valor vive en los scripts del catálogo, no en el .3d.
 const ESPESOR_DEFECTO = 18;
 
-export function interpretarEscena3D(texto: string): Escena3D {
+/** Opciones del intérprete: `biblioteca` devuelve el texto del `.3d` de un objeto de la biblioteca de TeoWin. */
+export interface OpcionesInterprete {
+  biblioteca?: (catalogo: string, familia: string, nombre: string) => string | null;
+}
+
+export function interpretarEscena3D(texto: string, opciones: OpcionesInterprete = {}): Escena3D {
   const cab = {
     pedido: /^metai P (.+)$/m.exec(texto)?.[1]?.trim() ?? null,
     version3d: /^\/\/version (.+)$/m.exec(texto)?.[1]?.trim() ?? null,
@@ -694,6 +845,29 @@ export function interpretarEscena3D(texto: string): Escena3D {
   ) => {
     // Las patas (objeti PAT) quedan bajo el zócalo y TeoWin no las muestra desde afuera: no se dibujan.
     if (NODOS_IGNORADOS.has(n.nombre) || n.nuncaVisible || n.objeti === "PAT") return;
+    // Objeto de la biblioteca de TeoWin (atrezzo) sin geometría en la escena: se toma del archivo del catálogo.
+    if (n.biblioteca && !n.bibliotecaCargada && opciones.biblioteca && !tieneGeometria(n)) {
+      n.bibliotecaCargada = true;
+      const txt = opciones.biblioteca(n.catalogo, n.familia, n.nombre);
+      const cat = txt ? parsearArbol(txt).kids[0] : undefined;
+      if (cat) {
+        // La escena puede escalar el objeto (`escalable`): la malla del catálogo se ajusta a su tamaño.
+        const f: Vec3 = [1, 1, 1];
+        (["L", "H", "P"] as const).forEach((k, j) => {
+          const a = n.local[k] ?? Number(n.use[k]);
+          const b = cat.local[k];
+          if (Number.isFinite(a) && b && Math.abs(a / b - 1) > 0.01) f[j] = a / b;
+        });
+        const escalar = (nodo: Nodo) => {
+          for (const mc of nodo.meshes) for (let k = 0; k < mc.v.length; k += 3) for (let j = 0; j < 3; j++) mc.v[k + j] *= f[j];
+          nodo.kids.forEach(escalar);
+        };
+        if (f.some((x) => x !== 1)) escalar(cat);
+        n.kids.push(...cat.kids);
+        n.prims.push(...cat.prims);
+        n.meshes.push(...cat.meshes);
+      }
+    }
     // Un objeto de un catálogo de fábrica colgado de una pared (ej. una puerta de paso, catálogo 658)
     // también se dibuja; los del catálogo 1 (ventanas, cotas) y 641 (decoración) no.
     const cat = n.catalogo || catPadre;
@@ -790,7 +964,8 @@ export function interpretarEscena3D(texto: string): Escena3D {
     for (const pr of n.prims) {
       if (pr.invisible) continue;
       if (pr.tipo === "faceset" || pr.tipo === "face") {
-        if (n.objeti !== "PAI" && n.objeti !== "PAE") continue;
+        const esCara = n.objeti === "TQC" || n.objeti === "CLC";
+        if (n.objeti !== "PAI" && n.objeti !== "PAE" && !esCara) continue;
         const dim = evVec(pr.args[1], env);
         if (!dim) continue;
         const [w, h] = dim;
@@ -804,19 +979,24 @@ export function interpretarEscena3D(texto: string): Escena3D {
           const d = apply(M2, c);
           return rv([T2[0] + d[0], T2[1] + d[1], T2[2] + d[2]]);
         }) as ParedEscena["p"];
-        const lado = n.objeti === "PAI" ? "int" : "ext";
+        const lado = n.objeti === "PAE" ? "ext" : "int";
         // Una puerta de paso colgada de la pared (su `objpath` es el vano) deja un hueco en la cara.
         const huecos: [number, number, number, number][] = [];
         if (lado === "int") {
           for (const k of n.kids) {
             if (k.nuncaVisible || !k.pos) continue;
             const kp = evVec(k.pos, env);
-            const vano = buscarNodo(k, "objpath")?.prims.find((q) => q.tipo === "extrude" || q.tipo === "extrudeSp");
+            const vano = buscarHueco(k);
             if (!kp || !vano) continue;
-            const pts = vano.args.slice(2).filter((g) => g.length >= 3).map((g) => evVec(g, {}));
+            const prim = vano.prims.find((q) => q.tipo === "extrude" || q.tipo === "extrudeSp");
+            if (!prim) continue;
+            // El perfil puede usar L/H/P del propio objeto (ventanas) y el nodo del hueco puede tener su `virtual`.
+            const envK: Entorno = { ...env, ...k.local };
+            const off = vano.virtual ? (evVec(vano.virtual[0], envK) ?? [0, 0, 0]) : [0, 0, 0];
+            const pts = prim.args.slice(2).filter((g) => g.length >= 3).map((g) => evVec(g, envK));
             if (pts.length < 3 || pts.some((q) => q === null)) continue;
-            const xs = (pts as Vec3[]).map((q) => q[0]);
-            const ys = (pts as Vec3[]).map((q) => q[1]);
+            const xs = (pts as Vec3[]).map((q) => q[0] + off[0]);
+            const ys = (pts as Vec3[]).map((q) => q[1] + off[1]);
             huecos.push([
               r1(kp[0] + Math.min(...xs)),
               r1(kp[1] + Math.min(...ys)),
@@ -827,16 +1007,27 @@ export function interpretarEscena3D(texto: string): Escena3D {
         }
         out.paredes.push(
           lado === "int" && pr.materialCad
-            ? { lado, p, m: pr.materialCad, ...(pr.tile ? { t: pr.tile } : {}), ...(huecos.length ? { h: huecos } : {}) }
+            ? { lado, p, m: pr.materialCad, ...(pr.tile ? { t: pr.tile } : {}), ...(huecos.length ? { h: huecos } : {}), ...(esCara ? { d: 1 as const } : {}) }
             : lado === "int" && huecos.length
-              ? { lado, p, h: huecos }
-              : { lado, p },
+              ? { lado, p, h: huecos, ...(esCara ? { d: 1 as const } : {}) }
+              : { lado, p, ...(esCara ? { d: 1 as const } : {}) },
         );
-        if (lado === "int") inicioParedes.push([p[0][0], p[0][2]]);
-      } else if (enModulo && pr.tipo === "revol") {
-        // revol(tamaño)(desplazamiento) alfa(grados)(p0)…(pn): perfil (x = radio, y = altura) girado sobre Y.
+        if (lado === "int" && !esCara) inicioParedes.push([p[0][0], p[0][2]]);
+      } else if (pr.tipo === "poly") {
+        // Viga (objeti VG): polígono plano en abanico. Las paredes y los techos también usan `poly`: no se dibujan.
+        if (n.objeti !== "VG") continue;
+        const pv = pr.args.filter((g) => g.length >= 3).map((g) => evVec(g, env));
+        if (pv.length < 3 || pv.some((q) => q === null)) continue;
+        const vv: number[] = [];
+        for (const q of pv as Vec3[]) vv.push(q[0], q[1], q[2]);
+        const ii: number[] = [];
+        for (let k = 1; k + 1 < pv.length; k++) ii.push(0, k, k + 1);
+        emitirMalla({ v: vv, i: ii, uv: null }, { m: pr.m, c: pr.c, opacidad: pr.opacidad }, M2, T2, id, anim, cat, n.nombre);
+      } else if (enModulo && (pr.tipo === "revol" || pr.tipo === "revolSp")) {
+        // revol(tamaño)(desplazamiento) [ang(x,y,z)] alfa(grados)(p0)…(pn): el perfil (radio, altura) se gira sobre Y.
+        // En el plano XY el radio es x; en el ZY (x = 0) es z.
         if (pr.invisible) continue;
-        const G = grupos(pr.raw);
+        const G = grupos(pr.raw.split(/tg\(/)[0]);
         const off = evVec(G[1], env);
         const alfa = G.find((g) => g.length === 1)?.[0];
         const perfil = G.slice(2)
@@ -844,17 +1035,19 @@ export function interpretarEscena3D(texto: string): Escena3D {
           .map((g) => evVec(g, env));
         if (!off || perfil.length < 3 || perfil.some((q) => q === null)) continue;
         const rev = mallaDeRevolucion(
-          (perfil as Vec3[]).map((q) => [Math.abs(q[0]), q[1]] as [number, number]),
+          (perfil as Vec3[]).map((q) => [Math.hypot(q[0], q[2]), q[1]] as [number, number]),
           Number(alfa ?? 360) || 360,
         );
+        const Rp = pr.ang ? rotacion(...(pr.ang.slice(0, 3).map((x) => ev(x, env) ?? 0) as [number, number, number])) : ID3;
         for (let k = 0; k < rev.v.length; k += 3) {
-          rev.v[k] += off[0];
-          rev.v[k + 1] += off[1];
-          rev.v[k + 2] += off[2];
+          const q = apply(Rp, [rev.v[k], rev.v[k + 1], rev.v[k + 2]]);
+          rev.v[k] = q[0] + off[0];
+          rev.v[k + 1] = q[1] + off[1];
+          rev.v[k + 2] = q[2] + off[2];
         }
         emitirMalla({ v: rev.v, i: rev.i, uv: null }, { m: pr.m, c: pr.c, opacidad: pr.opacidad }, M2, T2, id, anim, cat, n.nombre);
       } else if (enModulo && (pr.tipo === "tube" || pr.tipo === "tubeSp")) {
-        // tube(tamaño)(desplazamiento)(p0)(p1)(r0)(r1) · tubeSp(tamaño)(desplazamiento)[aspectR(x)](p0)…(pn)tg(…)(r0)…(rn)
+        // tube(tamaño)(desplazamiento)[ang(x,y,z)](p0)(p1)(r0)(r1) · tubeSp(…)[aspectR(x)](p0)…(pn)tg(…)(r0)…(rn)
         const [antes, despues] = pr.raw.split(/tg\(/);
         const G = grupos(antes);
         const off = evVec(G[1], env);
@@ -863,13 +1056,33 @@ export function interpretarEscena3D(texto: string): Escena3D {
         const radios = rads.map((g) => ev(g[0], env) ?? 5);
         if (!off || pts.length < 2 || pts.some((q) => q === null)) continue;
         if (pr.invisible) continue;
-        const local = (pts as Vec3[]).map((q) => [off[0] + q[0], off[1] + q[1], off[2] + q[2]] as Vec3);
+        const Rt = pr.ang ? rotacion(...(pr.ang.slice(0, 3).map((x) => ev(x, env) ?? 0) as [number, number, number])) : ID3;
+        const local = (pts as Vec3[]).map((q) => {
+          const r = apply(Rt, q);
+          return [off[0] + r[0], off[1] + r[1], off[2] + r[2]] as Vec3;
+        });
         const tubo = mallaDeTubo(local, radios);
         emitirMalla({ v: tubo.v, i: tubo.i, uv: null }, { m: pr.m, c: pr.c, opacidad: pr.opacidad }, M2, T2, id, anim, cat, n.nombre);
       } else if (enModulo) {
-        let off: Vec3 | null;
-        let dim: Vec3 | null;
-        if (pr.tipo === "extrude" || pr.tipo === "extrudeSp") {
+        let off: Vec3 | null = null;
+        let dim: Vec3 | null = null;
+        if (cat === "636" && n.objeti === "EN") {
+          // Encimera (catálogo 636): una losa de 30 mm del tamaño declarado; el `extrude` sin etiqueta es el hueco.
+          if (pr.sinEti) continue;
+          const tam = evVec(pr.args[0], env);
+          off = evVec(pr.args[1], env);
+          dim = tam && tam.every((x) => x > 0.5) ? tam : null;
+        } else if (pr.tipo === "extrude" || pr.tipo === "extrudeSp") {
+          // Contorno plano que no es un rectángulo (marcos, perfiles, bordes de bacha): prisma exacto.
+          const prisma = prismaDePrimitiva(pr, n, env, ev, evVec);
+          if (prisma) {
+            emitirMalla({ v: prisma.v, i: prisma.i, uv: null }, { m: pr.m, c: pr.c, opacidad: pr.opacidad }, M2, T2, id, anim, cat, n.nombre);
+            continue;
+          }
+        }
+        if (cat === "636" && n.objeti === "EN") {
+          // ya resuelta arriba
+        } else if (pr.tipo === "extrude" || pr.tipo === "extrudeSp") {
           const caja = cajaDeExtrusion(pr.args, env, ev, evVec);
           if (!caja) continue;
           [off, dim] = caja;
@@ -880,7 +1093,7 @@ export function interpretarEscena3D(texto: string): Escena3D {
         if (!off || !dim) continue;
         // Volúmenes auxiliares (sin material ni color propio) y piezas planas (rieles
         // de 0 mm de espesor) no se dibujan: TeoWin tampoco las muestra como sólidos.
-        if (pr.m === "" && pr.c && pr.c[0] === 1 && pr.c[1] === 1 && pr.c[2] === 1) continue;
+        if (!n.atrezzo && pr.m === "" && pr.c && pr.c[0] === 1 && pr.c[1] === 1 && pr.c[2] === 1) continue;
         if (Math.min(dim[0], dim[1], dim[2]) < 0.5) continue;
         const o = apply(M2, off);
         let Mc = M2;
@@ -900,6 +1113,11 @@ export function interpretarEscena3D(texto: string): Escena3D {
           ...(cat !== "4" ? { k: cat } : {}),
         });
       }
+    }
+    if (enModulo && n.camino.length >= 3 && !tieneGeometria(n) && (n.objeti === "SWL" || n.objeti === "EN" || n.objeti === "CPT")) {
+      // Encimera sin sólido en el .3d: TeoWin la genera desde el recorrido (cara inferior a 870 mm, 30 mm de espesor).
+      const losa = prismaDeContorno(n.camino, 30);
+      if (losa) emitirMalla({ v: losa.v, i: losa.i, uv: null }, { m: "", c: [0.93, 0.93, 0.93], opacidad: null }, M2, T2, id, anim, cat, n.nombre);
     }
     if (enModulo) {
       for (const mc of n.meshes) {
@@ -929,6 +1147,12 @@ export function interpretarEscena3D(texto: string): Escena3D {
         dim: [env.L ?? 0, env.H ?? 0, env.P ?? 0],
       });
       caminar(k, {}, ID3, [0, 0, 0], k.idEscena, true, null, k.catalogo);
+    } else if (k.objeti === "TQ" || k.objeti === "CL" || k.objeti === "VG") {
+      // Tabique, columna o viga del cuarto: caras (`cara0…5`, TQC/CLC) o polígono (VG), en el catálogo 641.
+      caminar(k, {}, ID3, [0, 0, 0], k.idEscena, k.objeti === "VG", null, "641");
+    } else if ((k.objeti === "EN" || k.objeti === "CPT") && k.catalogo === "1") {
+      // Encimera y copete de la cocina: objeto de nivel 1 cuyos hijos son del catálogo 636.
+      caminar(k, {}, ID3, [0, 0, 0], k.idEscena, true, null, "636");
     } else if (k.objeti === "ZCH" || k.objeti === "ZC") {
       // Zócalo del cuarto (ZCH, perfiles del 641) o de la cocina (ZC, catálogo 3): se dibuja como cajas.
       caminar(k, {}, ID3, [0, 0, 0], k.idEscena, true, null, k.objeti === "ZC" ? "3" : "641");

@@ -6,6 +6,7 @@
 // Usa DATABASE_URL del .env. Después copia a la base las texturas que falten.
 import { Prisma } from "@prisma/client";
 import { prisma } from "../src/config/prisma";
+import { leerBibliotecaTeoWin } from "../src/modules/escenas-pedido/parser/biblioteca-3d";
 import { interpretarEscena3D, PARSER_VERSION } from "../src/modules/escenas-pedido/parser/escena-3d.parser";
 import { asegurarTexturas } from "../src/modules/texturas-3d/texturas-3d.service";
 
@@ -26,7 +27,7 @@ async function main() {
     const e = await prisma.escenaPedido.findUnique({ where: { id }, select: { contenido: true } });
     if (!e) continue;
     try {
-      const escena = interpretarEscena3D(Buffer.from(e.contenido).toString("latin1"));
+      const escena = interpretarEscena3D(Buffer.from(e.contenido).toString("latin1"), { biblioteca: leerBibliotecaTeoWin });
       await prisma.escenaPedido.update({
         where: { id },
         data: { escena: escena as unknown as Prisma.InputJsonValue, parser_version: PARSER_VERSION },

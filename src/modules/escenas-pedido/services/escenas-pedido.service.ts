@@ -2,6 +2,7 @@ import { Prisma } from "@prisma/client";
 import { prisma } from "../../../config/prisma";
 import { AppError } from "../../../utils/AppError";
 import { asegurarTexturas } from "../../texturas-3d/texturas-3d.service";
+import { leerBibliotecaTeoWin } from "../parser/biblioteca-3d";
 import { interpretarEscena3D, PARSER_VERSION, type Escena3D } from "../parser/escena-3d.parser";
 
 // Escenas 3D de un pedido (.3d de TeoWin), solo lectura (diseño.md §13).
@@ -55,7 +56,7 @@ export async function crearEscena(
 
   let escena: Escena3D;
   try {
-    escena = interpretarEscena3D(input.contenido.toString("latin1"));
+    escena = interpretarEscena3D(input.contenido.toString("latin1"), { biblioteca: leerBibliotecaTeoWin });
   } catch {
     throw new AppError("No se pudo interpretar la escena .3d.", 422);
   }

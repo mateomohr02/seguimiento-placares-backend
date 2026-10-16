@@ -127,7 +127,7 @@ Copiá `.env.example` a `.env` y completá los valores. Nunca se sube `.env` al 
 | `TEOWIN_DB_NAME` | Nombre de la base dentro de esa instancia | `TeoWin` |
 | `TEOWIN_DB_USER` | Usuario de SQL Server | — |
 | `TEOWIN_DB_PASSWORD` | Contraseña de ese usuario | — |
-| `TEOWIN_3D_DIR` | *(opcional)* Carpeta de datos 3D de TeoWin (solo lectura) de donde se copian las texturas de las escenas 3D. Por defecto `T:/datos/3d/E_50`. Si el disco no está, las escenas se ven con colores lisos o con las texturas que ya se copiaron | `T:/datos/3d/E_50` |
+| `TEOWIN_3D_DIR` | *(opcional)* Carpeta de datos 3D de TeoWin (solo lectura) de donde se copian las texturas de las escenas 3D y se leen los objetos de la biblioteca (`<catálogo>\Catalogo\<familia>\<nombre>.3d`). Por defecto `T:/datos/3d/E_50`. Si el disco no está, las escenas se ven con colores lisos o con las texturas que ya se copiaron | `T:/datos/3d/E_50` |
 | `TEOWIN_DB_ENCRYPT` | Si la conexión requiere cifrado (mirar la config de conexión en SSMS) | `true` |
 | `TEOWIN_DB_TRUST_SERVER_CERTIFICATE` | Aceptar el certificado del servidor sin validarlo contra una CA pública | `true` |
 | `SESSION_SECRET` | **Obligatoria.** Clave que firma las sesiones. Mínimo 16 caracteres, aleatoria. Si se cambia, solo se cierran las sesiones abiertas | `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"` |

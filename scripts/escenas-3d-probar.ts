@@ -4,6 +4,7 @@
 // mallas omitidas). No toca la base de datos.
 import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
+import { leerBibliotecaTeoWin } from "../src/modules/escenas-pedido/parser/biblioteca-3d";
 import { interpretarEscena3D } from "../src/modules/escenas-pedido/parser/escena-3d.parser";
 
 const carpeta = process.argv[2];
@@ -20,7 +21,7 @@ for (const f of readdirSync(carpeta).filter((x) => x.endsWith(".3d") && x.includ
   total++;
   const t0 = Date.now();
   try {
-    const e = interpretarEscena3D(readFileSync(path.join(carpeta, f)).toString("latin1"));
+    const e = interpretarEscena3D(readFileSync(path.join(carpeta, f)).toString("latin1"), { biblioteca: leerBibliotecaTeoWin });
     const ms = Date.now() - t0;
     const kb = Math.round(JSON.stringify(e).length / 1024);
     const problemas: string[] = [];
