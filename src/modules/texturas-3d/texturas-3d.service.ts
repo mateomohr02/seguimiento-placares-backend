@@ -17,17 +17,15 @@ export function normalizarClave(material: string): string {
   return material.trim().replace(/^<\d+>/, "").trim().toLowerCase();
 }
 
-// Catálogos con textura propia: 4 = Placares (fábrica), 3 = Cocinas, 641 = pavimentos y
-// revestimientos (decoración: pisos, papel pintado, cemento). Carpetas "planas" de colores (rápidas
-// de listar) y árboles de texturas (se indexan una sola vez).
-const DIRS: Record<string, { planas: string[]; arboles: string[] }> = {
-  "4": { planas: ["4/Colores", "Showroom/4/colores"], arboles: ["4/Texturas"] },
-  "3": { planas: ["3/Colores", "Showroom/3/colores"], arboles: ["3/Texturas"] },
-  "641": { planas: ["Showroom/641/colores", "641/Colores"], arboles: ["641/Texturas"] },
-  // 658 = puertas de paso (colgadas de las paredes)
-  "658": { planas: ["658/Colores", "Showroom/658/colores"], arboles: ["658/Texturas"] },
-};
-const CATALOGOS = Object.keys(DIRS);
+// Catálogos de TeoWin con textura propia: 3 = Cocinas, 4 = Placares (fábrica) y los de decoración y
+// equipamiento (636 encimeras, 637 electrodomésticos, 638 mesas y sillas de cocina, 640 sanitarios,
+// 641 pavimentos y revestimientos, 646 alfombras, 647 cuadros y espejos, 648-651 y 656 decoración,
+// 652 lámparas, 653 sofás, 654 mesas y sillas, 655 animaciones, 658 puertas y ventanas). Cada uno tiene una
+// carpeta plana de colores (rápida de listar) y un árbol de texturas (se indexa una sola vez).
+const CATALOGOS = ["4", "3", "658", "641", "636", "637", "638", "640", "646", "647", "648", "649", "650", "651", "652", "653", "654", "655", "656"];
+const DIRS: Record<string, { planas: string[]; arboles: string[] }> = Object.fromEntries(
+  CATALOGOS.map((c) => [c, { planas: [`${c}/Colores`, `Showroom/${c}/colores`], arboles: [`${c}/Texturas`] }]),
+);
 
 const cacheCarpetas = new Map<string, Map<string, string>>();
 const indices = new Map<string, Promise<Map<string, string>>>();
@@ -88,6 +86,16 @@ async function buscarEnArbol(rel: string, clave: string): Promise<string | null>
   return mapa.get(clave) ?? null;
 }
 
+let indexandoTodo = false;
+/** Indexa en segundo plano los árboles de todos los catálogos (para las búsquedas cruzadas). */
+function indexarTodoEnSegundoPlano() {
+  if (indexandoTodo) return;
+  indexandoTodo = true;
+  void (async () => {
+    for (const cat of CATALOGOS) for (const rel of DIRS[cat].arboles) await buscarEnArbol(rel, "").catch(() => null);
+  })();
+}
+
 /** Busca la textura en el catálogo pedido y, si no está, en los demás (en ese orden). */
 async function buscarEnDisco(catalogo: string, clave: string): Promise<string | null> {
   const orden = [catalogo, ...CATALOGOS.filter((c) => c !== catalogo)].filter((c) => DIRS[c]);
@@ -97,10 +105,13 @@ async function buscarEnDisco(catalogo: string, clave: string): Promise<string | 
       if (hit) return hit;
     }
     for (const rel of DIRS[cat].arboles) {
+      // El árbol del catálogo pedido se espera; los de los demás solo si ya se indexaron.
+      if (cat !== catalogo && !indices.has(rel)) continue;
       const hit = await buscarEnArbol(rel, clave);
       if (hit) return hit;
     }
   }
+  if (!indexandoTodo) indexarTodoEnSegundoPlano();
   return null;
 }
 

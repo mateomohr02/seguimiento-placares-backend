@@ -8,7 +8,7 @@ import { evaluar, grupos, oculto, type Entorno } from "./expresion";
 // mueven (cajones y hojas corredizas) para animarlas, y los materiales de paredes y piso.
 // Subir PARSER_VERSION cuando cambie la salida (el original se conserva en la
 // base, así se puede re-interpretar).
-export const PARSER_VERSION = 14;
+export const PARSER_VERSION = 20;
 
 export interface CajaEscena {
   /** idEscena del módulo al que pertenece (null = no asociada). */
@@ -43,6 +43,28 @@ export interface AnimacionEscena {
   dist: number;
 }
 
+/** Malla de triángulos (cortinas, barandas, tubos, vidrios con forma…): vértices ya compactados. */
+export interface MallaEscena {
+  mod: number | null;
+  /** Código de material de TeoWin; "" si no tiene. */
+  m: string;
+  c: [number, number, number] | null;
+  /** Origen y rotación (3×3 por filas) del objeto al que pertenece la malla. */
+  t: [number, number, number];
+  r: number[];
+  /** Vértices x,y,z consecutivos (mm, en el sistema del objeto). */
+  v: number[];
+  /** Triángulos: 3 índices de vértice por cara. */
+  i: number[];
+  /** Coordenadas de textura u,v por vértice, si las trae. */
+  uv?: number[];
+  a?: number;
+  o?: number;
+  k?: string;
+  /** Sin iluminación: foto de paisaje (se ve igual desde cualquier lado). */
+  e?: 1;
+}
+
 export interface ParedEscena {
   lado: "int" | "ext";
   /** 4 vértices del rectángulo (mm). */
@@ -72,6 +94,8 @@ export interface Escena3D {
   cabecera: { pedido: string | null; version3d: string | null };
   modulos: ModuloEscena[];
   cajas: CajaEscena[];
+  /** Mallas de triángulos (`malla`/`caras`) y tubos (`tube`/`tubeSp`). */
+  mallas: MallaEscena[];
   paredes: ParedEscena[];
   animaciones: AnimacionEscena[];
   /** Material decorativo del piso (ej. parquet), si lo declara. */
@@ -99,6 +123,21 @@ interface Primitiva {
   materialCad: string | null;
   /** Medida de la baldosa del patrón del CAD (paredes). */
   tile: [number, number] | null;
+  /** Texto completo de la primitiva (tubos). */
+  raw: string;
+  /** `ang(x,y,z)` intercalado en una extrusión (zócalos): la gira sobre su desplazamiento. */
+  ang: string[] | null;
+}
+
+/** Malla leída del .3d, todavía sin compactar. */
+interface MallaCruda {
+  m: string;
+  c: [number, number, number] | null;
+  opacidad: number | null;
+  invisible: boolean;
+  v: number[];
+  i: number[];
+  uv: number[];
 }
 
 class Nodo {
@@ -134,6 +173,14 @@ class Nodo {
   /** Medida de la baldosa del patrón del CAD del nodo (piso). */
   tile: [number, number] | null = null;
   prims: Primitiva[] = [];
+  meshes: MallaCruda[] = [];
+  /** `idrep(n)`: número de repetición del objeto en una serie (travesaños, listones): lo usan las fórmulas. */
+  idrep: number | null = null;
+  /** Solo la raíz: `globalParam` de cada catálogo (`DatosCat(n)`), p. ej. Hz = altura del zócalo. */
+  globales: Record<string, Record<string, string>> = {};
+  mallaActual: MallaCruda | null = null;
+  /** Último material declarado (`mat"X"`): las líneas `color(...)` sin material lo heredan. */
+  lastMat = "";
   constructor(readonly nombre: string) {}
 }
 
@@ -156,11 +203,154 @@ function tileDeCad(t: string): [number, number] | null {
 // "objpath" es el volumen del hueco que la puerta de paso abre en la pared y "objformapath" el marco de cada hoja (un sólido sin el hueco, que no se puede restar): no se dibujan.
 const NODOS_IGNORADOS = new Set(["mecanizado", "label", "defespigameca", "objpath", "objformapath"]);
 
+const ATTR = /^(eti"|mat"|color\()/;
+const PRIM = /\b(taulerv|taulerh|taulerf|extrudeSp|extrude|tubeSp|tube|revol|faceset|face)(\(.*)$/;
+const PRIM_LINEA = /^(taulerv|taulerh|taulerf|extrudeSp|extrude|tubeSp|tube|revol)\(/;
+
+/** Recorre los grupos `(...)` de una línea a partir de `desde`, sin armar arreglos intermedios. */
+function recorrerGrupos(s: string, desde: number, cb: (g: string) => void) {
+  let i = desde;
+  while (i < s.length) {
+    const a = s.indexOf("(", i);
+    if (a < 0) break;
+    const b = s.indexOf(")", a);
+    if (b < 0) break;
+    cb(s.slice(a + 1, b));
+    i = b + 1;
+  }
+}
+
+function leerMalla(t: string, mc: MallaCruda) {
+  if (t.startsWith("malla(")) {
+    recorrerGrupos(t, 5, (g) => {
+      const p = g.split(",");
+      if (p.length >= 3) mc.v.push(Number(p[0]), Number(p[1]), Number(p[2]));
+    });
+  } else if (t.startsWith("caras(")) {
+    // El primer grupo (sin comas) es la cantidad de caras; cada cara son índices terminados en -1.
+    recorrerGrupos(t, 5, (g) => {
+      if (!g.includes(",")) return;
+      const idx = g.split(",").map(Number).filter((x) => x >= 0);
+      for (let k = 1; k + 1 < idx.length; k++) mc.i.push(idx[0], idx[k], idx[k + 1]);
+    });
+  } else if (t.startsWith("texcoord(")) {
+    recorrerGrupos(t, 8, (g) => {
+      const p = g.split(",");
+      if (p.length >= 2) mc.uv.push(Number(p[0]), Number(p[1]));
+    });
+  }
+}
+
+/** Quita vértices repetidos y redondea (0,1 mm; 0,001 en UV): el JSON queda más chico. */
+function compactarMalla(v: number[], idx: number[], uv: number[] | null) {
+  const mapa = new Map<string, number>();
+  const nv: number[] = [];
+  const nuv: number[] = [];
+  const nuevo = new Array<number>(v.length / 3);
+  for (let k = 0; k < v.length / 3; k++) {
+    const x = Math.round(v[k * 3] * 10) / 10;
+    const y = Math.round(v[k * 3 + 1] * 10) / 10;
+    const z = Math.round(v[k * 3 + 2] * 10) / 10;
+    const u = uv ? Math.round(uv[k * 2] * 1000) / 1000 : 0;
+    const w = uv ? Math.round(uv[k * 2 + 1] * 1000) / 1000 : 0;
+    const clave = `${x},${y},${z},${u},${w}`;
+    let n = mapa.get(clave);
+    if (n === undefined) {
+      n = nv.length / 3;
+      mapa.set(clave, n);
+      nv.push(x, y, z);
+      if (uv) nuv.push(u, w);
+    }
+    nuevo[k] = n;
+  }
+  const ni: number[] = [];
+  for (let k = 0; k + 2 < idx.length; k += 3) {
+    const a = nuevo[idx[k]];
+    const b = nuevo[idx[k + 1]];
+    const c = nuevo[idx[k + 2]];
+    if (a === undefined || b === undefined || c === undefined || a === b || b === c || a === c) continue;
+    ni.push(a, b, c);
+  }
+  return { v: nv, i: ni, uv: uv ? nuv : null };
+}
+
+/** Sólido de revolución sobre el eje Y: el perfil son pares (radio, altura); `alfa` grados de barrido. */
+function mallaDeRevolucion(perfil: [number, number][], alfa: number): { v: number[]; i: number[] } {
+  const barrido = Math.min(360, Math.max(1, alfa));
+  const cerrado = barrido >= 359.9;
+  const lados = Math.max(6, Math.round((barrido / 360) * 20));
+  const anillos = cerrado ? lados : lados + 1;
+  const v: number[] = [];
+  const idx: number[] = [];
+  for (let k = 0; k < anillos; k++) {
+    const a = ((k / lados) * barrido * Math.PI) / 180;
+    for (const [r, y] of perfil) v.push(r * Math.cos(a), y, r * Math.sin(a));
+  }
+  const n = perfil.length;
+  const filas = cerrado ? lados : lados;
+  for (let k = 0; k < filas; k++) {
+    const k2 = (k + 1) % anillos;
+    for (let j = 0; j + 1 < n; j++) {
+      const a0 = k * n + j;
+      const b0 = k * n + j + 1;
+      const a1 = k2 * n + j;
+      const b1 = k2 * n + j + 1;
+      idx.push(a0, b0, a1, a1, b0, b1);
+    }
+  }
+  return { v, i: idx };
+}
+
+/** Tubo redondo que recorre `pts` con un radio por punto (cilindros troncocónicos, 10 lados). */
+function mallaDeTubo(pts: Vec3[], radios: number[]): { v: number[]; i: number[] } {
+  const LADOS = 10;
+  const v: number[] = [];
+  const idx: number[] = [];
+  const base = (d: Vec3): [Vec3, Vec3] => {
+    const a: Vec3 = Math.abs(d[1]) < 0.9 ? [0, 1, 0] : [1, 0, 0];
+    const u: Vec3 = [d[1] * a[2] - d[2] * a[1], d[2] * a[0] - d[0] * a[2], d[0] * a[1] - d[1] * a[0]];
+    const ln = Math.hypot(u[0], u[1], u[2]) || 1;
+    const un: Vec3 = [u[0] / ln, u[1] / ln, u[2] / ln];
+    const w: Vec3 = [d[1] * un[2] - d[2] * un[1], d[2] * un[0] - d[0] * un[2], d[0] * un[1] - d[1] * un[0]];
+    return [un, w];
+  };
+  for (let s = 0; s + 1 < pts.length; s++) {
+    const a = pts[s];
+    const b = pts[s + 1];
+    const d: Vec3 = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+    const ln = Math.hypot(d[0], d[1], d[2]);
+    if (ln < 1e-6) continue;
+    const dn: Vec3 = [d[0] / ln, d[1] / ln, d[2] / ln];
+    const [u, w] = base(dn);
+    const ra = Math.max(0.1, radios[s] ?? radios[0] ?? 5);
+    const rb = Math.max(0.1, radios[s + 1] ?? ra);
+    const o = v.length / 3;
+    for (let k = 0; k < LADOS; k++) {
+      const ang = (k / LADOS) * Math.PI * 2;
+      const c = Math.cos(ang);
+      const sn = Math.sin(ang);
+      const dir: Vec3 = [u[0] * c + w[0] * sn, u[1] * c + w[1] * sn, u[2] * c + w[2] * sn];
+      v.push(a[0] + dir[0] * ra, a[1] + dir[1] * ra, a[2] + dir[2] * ra);
+      v.push(b[0] + dir[0] * rb, b[1] + dir[1] * rb, b[2] + dir[2] * rb);
+    }
+    for (let k = 0; k < LADOS; k++) {
+      const k2 = (k + 1) % LADOS;
+      const a0 = o + k * 2;
+      const b0 = o + k * 2 + 1;
+      const a1 = o + k2 * 2;
+      const b1 = o + k2 * 2 + 1;
+      idx.push(a0, b0, a1, a1, b0, b1);
+    }
+  }
+  return { v, i: idx };
+}
+
 function parsearArbol(texto: string): Nodo {
   const raiz = new Nodo("ROOT");
   const pila: Nodo[] = [raiz];
   let pendiente: Nodo | null = null;
-  let etiPendiente: string | null = null;
+  let attr: string | null = null;
+  let catDatos: string | null = null;
   for (const linea of texto.split(/\r?\n/)) {
     const t = linea.trim();
     if (!t) continue;
@@ -169,14 +359,30 @@ function parsearArbol(texto: string): Nodo {
       const n = new Nodo(m[1]);
       pila[pila.length - 1].kids.push(n);
       pendiente = n;
+      attr = null;
       continue;
     }
     if (t === "{") {
       if (pendiente) pila.push(pendiente);
+      attr = null;
       continue;
     }
     if (t === "}") {
       if (pila.length > 1) pila.pop();
+      attr = null;
+      continue;
+    }
+    // Parámetros globales de cada catálogo (Hz, He, Pe…): los usan las fórmulas de los muebles.
+    if ((m = /^DatosCat\((\d+)\)/.exec(t))) {
+      catDatos = m[1];
+      continue;
+    }
+    if (t === "FinDatosCat") {
+      catDatos = null;
+      continue;
+    }
+    if (catDatos && (m = /^globalParam\s+(\S+)\s*=\s*"([^"]*)"/.exec(t))) {
+      (raiz.globales[catDatos] ??= {})[m[1]] = m[2];
       continue;
     }
     const o = pila[pila.length - 1];
@@ -201,33 +407,67 @@ function parsearArbol(texto: string): Nodo {
     else if (t.startsWith("ang(")) o.ang = grupos(t)[0] ?? null;
     else if (t.startsWith("pos(")) o.pos = grupos(t)[0] ?? null;
     else if ((m = /^idEscena\((\d+)\)/.exec(t))) o.idEscena = Number(m[1]);
+    else if ((m = /^idrep\((\d+)\)/.exec(t))) o.idrep = Number(m[1]);
     else if ((m = /^objeti"(\w*)"/.exec(t))) o.objeti = m[1];
     else if ((m = /^familia"(\w+)"/.exec(t))) o.familia = m[1];
     else if ((m = /^IDCatalogo"(\d+)"/.exec(t))) o.catalogo = m[1];
     else if ((m = /^matTablero 128,"[^"]*","([\d.]+)"/.exec(t))) o.espesor = Number(m[1]);
     else if (t.startsWith("invisibilidad(")) o.invisibilidad = t.slice(14, t.lastIndexOf(")"));
     else if ((m = /^nombreModulo"([^"]*)"/.exec(t))) o.nombreModulo = m[1];
-    else if (t.startsWith("eti") || /^mat"/.test(t) || (etiPendiente !== null && /^(taulerv|taulerh|taulerf|extrudeSp|extrude)\(/.test(t))) {
-      // A veces la primitiva viene en la línea siguiente a la de `eti"..." mat"..."` (tiras de canto): se unen.
-      const esEti = t.startsWith("eti") || /^mat"/.test(t);
-      const completa: string = !esEti && etiPendiente !== null ? `${etiPendiente} ${t}` : t;
-      const prim = /\b(taulerv|taulerh|taulerf|extrudeSp|extrude|faceset|face)(\(.*)$/.exec(completa);
-      etiPendiente = prim ? null : esEti ? t : etiPendiente;
+    else if (ATTR.test(t) || (attr !== null && PRIM_LINEA.test(t))) {
+      // La primitiva puede venir en la misma línea que `eti"..." mat"..."` o en la siguiente (tiras de canto,
+      // marcos de puertas); una línea `color(...)` sin material hereda el último `mat"..."`.
+      const esAttr = ATTR.test(t);
+      const completa: string = !esAttr && attr !== null ? `${attr} ${t}` : t;
+      const matTxt = /mat"([^"]*)"/.exec(completa);
+      if (esAttr) {
+        o.mallaActual = null;
+        if (matTxt) o.lastMat = matTxt[1];
+      }
+      const prim = PRIM.exec(completa);
+      attr = prim ? null : esAttr ? t : attr;
       if (prim) {
-        const mat = /mat"([^"]*)"/.exec(completa)?.[1] ?? "";
         const col = /color\(([\d.]+),([\d.]+),([\d.]+)\)/.exec(completa);
+        let cuerpo = prim[2];
+        let angPrim: string[] | null = null;
+        if (prim[1] === "extrude" || prim[1] === "extrudeSp") {
+          const ma = /\bang\(([^)]*)\)/.exec(cuerpo);
+          if (ma) {
+            angPrim = ma[1].split(",");
+            cuerpo = cuerpo.replace(ma[0], "");
+          }
+        }
         o.prims.push({
           tipo: prim[1],
           // extrudeSp trae un segundo perfil de tangentes después de `tg`: solo se usa el primero.
-          args: grupos(prim[1] === "extrudeSp" ? prim[2].split(/tg\(/)[0] : prim[2]),
-          m: mat,
+          args: grupos(prim[1] === "extrudeSp" ? cuerpo.split(/tg\(/)[0] : cuerpo),
+          m: matTxt ? matTxt[1] : o.lastMat,
           c: col ? [Number(col[1]), Number(col[2]), Number(col[3])] : null,
           invisible: /\btransp\(0(\.0+)?\)/.test(completa),
           opacidad: opacidadDe(completa),
           materialCad: /<MATERIAL>([^<]+)<\/MATERIAL>/.exec(completa)?.[1]?.trim() || null,
           tile: tileDeCad(completa),
+          raw: prim[2],
+          ang: angPrim,
         });
       }
+    } else if (/^(malla|caras|texcoord)\(/.test(t)) {
+      if (!o.mallaActual) {
+        const base = attr ?? "";
+        const matTxt = /mat"([^"]*)"/.exec(base);
+        const col = /color\(([\d.]+),([\d.]+),([\d.]+)\)/.exec(base);
+        o.mallaActual = {
+          m: matTxt ? matTxt[1] : o.lastMat,
+          c: col ? [Number(col[1]), Number(col[2]), Number(col[3])] : null,
+          opacidad: opacidadDe(base),
+          invisible: /\btransp\(0(\.0+)?\)/.test(base),
+          v: [],
+          i: [],
+          uv: [],
+        };
+        o.meshes.push(o.mallaActual);
+      }
+      leerMalla(t, o.mallaActual);
     }
   }
   return raiz;
@@ -292,7 +532,10 @@ function cajaDeExtrusion(
   }
   const rango = [max[0] - min[0], max[1] - min[1], max[2] - min[2]];
   const plano = rango.findIndex((r) => r < 1e-6);
-  if (plano < 0 || rango.filter((r) => r < 1e-6).length > 1) return null;
+  if (plano < 0 || rango.filter((r) => r < 1e-6).length > 1) {
+    // Perfil en 3D (zócalos con inglete): se dibuja como la caja de su tamaño declarado.
+    return size.every((x) => x > 0.5) ? [off, size] : null;
+  }
   // Un perfil que no es un rectángulo (tiras de canto con relieve, zócalos) se dibuja como su caja
   // envolvente: no es el perfil exacto, pero muestra la tira con su material y su tamaño.
   void ev;
@@ -363,6 +606,7 @@ export function interpretarEscena3D(texto: string): Escena3D {
     version3d: /^\/\/version (.+)$/m.exec(texto)?.[1]?.trim() ?? null,
   };
   const raiz = parsearArbol(texto);
+  const globales = raiz.globales;
   const escena = raiz.kids[0];
   const out: Escena3D = {
     version: PARSER_VERSION,
@@ -373,6 +617,7 @@ export function interpretarEscena3D(texto: string): Escena3D {
     animaciones: [],
     materialSuelo: null,
     sueloTile: null,
+    mallas: [],
     materiales: [],
     suelo: [],
     sinResolver: [],
@@ -396,6 +641,46 @@ export function interpretarEscena3D(texto: string): Escena3D {
   // su valor real está en el matTablero de cada pieza, no en un parámetro.
   const espesorVars = new Set<string>(["mymat"]);
 
+  // Presupuesto de números (vértices, índices y UV) de todas las mallas: el JSON que recibe el navegador
+  // no puede crecer sin límite (hay escenas con decenas de MB de mallas).
+  let presupuesto = 1_500_000;
+  const omitidas = new Set<string>();
+  const emitirMalla = (
+    crudo: { v: number[]; i: number[]; uv: number[] | null },
+    datos: { m: string; c: [number, number, number] | null; opacidad: number | null },
+    M2: Mat3,
+    T2: Vec3,
+    id: number | null,
+    anim: number | null,
+    cat: string,
+    nombre: string,
+  ) => {
+    if (crudo.v.length < 9 || crudo.i.length < 3) return;
+    const uvOk = crudo.uv && crudo.uv.length === (crudo.v.length / 3) * 2 ? crudo.uv : null;
+    const c = compactarMalla(crudo.v, crudo.i, uvOk);
+    if (c.i.length === 0) return;
+    const peso = c.v.length + c.i.length + (c.uv?.length ?? 0);
+    if (peso > presupuesto) {
+      omitidas.add(`malla omitida por tamaño: ${nombre}`);
+      return;
+    }
+    presupuesto -= peso;
+    out.mallas.push({
+      mod: id,
+      m: datos.m,
+      c: datos.c,
+      t: rv(T2),
+      r: M2.map((x) => Math.round(x * 1e4) / 1e4),
+      v: c.v,
+      i: c.i,
+      ...(c.uv ? { uv: c.uv } : {}),
+      ...(anim !== null ? { a: anim } : {}),
+      ...(datos.opacidad !== null ? { o: datos.opacidad } : {}),
+      ...(cat !== "4" ? { k: cat } : {}),
+      ...(/paisaje|skyline/i.test(nombre) || /^(skyline|paisaje)/i.test(datos.m) ? { e: 1 as const } : {}),
+    });
+  };
+
   const caminar = (
     n: Nodo,
     envPadre: Entorno,
@@ -407,12 +692,16 @@ export function interpretarEscena3D(texto: string): Escena3D {
     catPadre: string,
     enCorr = false,
   ) => {
-    if (NODOS_IGNORADOS.has(n.nombre) || n.nuncaVisible) return;
+    // Las patas (objeti PAT) quedan bajo el zócalo y TeoWin no las muestra desde afuera: no se dibujan.
+    if (NODOS_IGNORADOS.has(n.nombre) || n.nuncaVisible || n.objeti === "PAT") return;
     // Un objeto de un catálogo de fábrica colgado de una pared (ej. una puerta de paso, catálogo 658)
     // también se dibuja; los del catálogo 1 (ventanas, cotas) y 641 (decoración) no.
     const cat = n.catalogo || catPadre;
     const enModulo = enModuloPadre || (n.catalogo !== "" && n.catalogo !== "1" && n.catalogo !== "641");
     const env: Entorno = { ...envPadre };
+    if (n.catalogo && globales[n.catalogo]) {
+      for (const [k, v] of Object.entries(globales[n.catalogo])) if (/^-?\d+(\.\d+)?$/.test(v) && !k.startsWith("$")) env[k] = Number(v);
+    }
     for (const [k, v] of Object.entries(n.param)) {
       if (/^-?\d+(\.\d+)?$/.test(v)) env[k] = Number(v);
       else if (v === "") env[k] = 0; // parámetro sin uso en este mueble
@@ -421,6 +710,8 @@ export function interpretarEscena3D(texto: string): Escena3D {
         env[k] = env[k] ?? ESPESOR_DEFECTO;
       }
     }
+    if (n.idrep !== null) env.idrep = n.idrep;
+    env.getcxh = env.getcxh ?? 0; // altura propia de un cajón/frente: 0 = la del mueble (cmp[getcxh;0;=]*H+getcxh)
     env.mymat = env.mymat ?? ESPESOR_DEFECTO;
     if (n.espesor !== null && n.espesor > 0) for (const v of espesorVars) env[v] = n.espesor;
     for (const [k, v] of Object.entries(n.use)) {
@@ -542,6 +833,39 @@ export function interpretarEscena3D(texto: string): Escena3D {
               : { lado, p },
         );
         if (lado === "int") inicioParedes.push([p[0][0], p[0][2]]);
+      } else if (enModulo && pr.tipo === "revol") {
+        // revol(tamaño)(desplazamiento) alfa(grados)(p0)…(pn): perfil (x = radio, y = altura) girado sobre Y.
+        if (pr.invisible) continue;
+        const G = grupos(pr.raw);
+        const off = evVec(G[1], env);
+        const alfa = G.find((g) => g.length === 1)?.[0];
+        const perfil = G.slice(2)
+          .filter((g) => g.length >= 3)
+          .map((g) => evVec(g, env));
+        if (!off || perfil.length < 3 || perfil.some((q) => q === null)) continue;
+        const rev = mallaDeRevolucion(
+          (perfil as Vec3[]).map((q) => [Math.abs(q[0]), q[1]] as [number, number]),
+          Number(alfa ?? 360) || 360,
+        );
+        for (let k = 0; k < rev.v.length; k += 3) {
+          rev.v[k] += off[0];
+          rev.v[k + 1] += off[1];
+          rev.v[k + 2] += off[2];
+        }
+        emitirMalla({ v: rev.v, i: rev.i, uv: null }, { m: pr.m, c: pr.c, opacidad: pr.opacidad }, M2, T2, id, anim, cat, n.nombre);
+      } else if (enModulo && (pr.tipo === "tube" || pr.tipo === "tubeSp")) {
+        // tube(tamaño)(desplazamiento)(p0)(p1)(r0)(r1) · tubeSp(tamaño)(desplazamiento)[aspectR(x)](p0)…(pn)tg(…)(r0)…(rn)
+        const [antes, despues] = pr.raw.split(/tg\(/);
+        const G = grupos(antes);
+        const off = evVec(G[1], env);
+        const pts = G.slice(2).filter((g) => g.length >= 3).map((g) => evVec(g, env));
+        const rads = (pr.tipo === "tubeSp" && despues !== undefined ? grupos(`(${despues}`) : G.slice(2)).filter((g) => g.length === 1);
+        const radios = rads.map((g) => ev(g[0], env) ?? 5);
+        if (!off || pts.length < 2 || pts.some((q) => q === null)) continue;
+        if (pr.invisible) continue;
+        const local = (pts as Vec3[]).map((q) => [off[0] + q[0], off[1] + q[1], off[2] + q[2]] as Vec3);
+        const tubo = mallaDeTubo(local, radios);
+        emitirMalla({ v: tubo.v, i: tubo.i, uv: null }, { m: pr.m, c: pr.c, opacidad: pr.opacidad }, M2, T2, id, anim, cat, n.nombre);
       } else if (enModulo) {
         let off: Vec3 | null;
         let dim: Vec3 | null;
@@ -559,17 +883,28 @@ export function interpretarEscena3D(texto: string): Escena3D {
         if (pr.m === "" && pr.c && pr.c[0] === 1 && pr.c[1] === 1 && pr.c[2] === 1) continue;
         if (Math.min(dim[0], dim[1], dim[2]) < 0.5) continue;
         const o = apply(M2, off);
+        let Mc = M2;
+        if (pr.ang) {
+          const a = pr.ang.slice(0, 3).map((x) => ev(x, env) ?? 0);
+          Mc = mul(M2, rotacion(a[0] ?? 0, a[1] ?? 0, a[2] ?? 0));
+        }
         out.cajas.push({
           mod: id,
           m: pr.m,
           c: pr.c,
           t: rv([T2[0] + o[0], T2[1] + o[1], T2[2] + o[2]]),
-          r: M2.map((x) => Math.round(x * 1e4) / 1e4),
+          r: Mc.map((x) => Math.round(x * 1e4) / 1e4),
           s: [r1(dim[0]), r1(dim[1]), r1(dim[2])],
           ...(anim !== null ? { a: anim } : {}),
           ...(pr.opacidad !== null ? { o: pr.opacidad } : {}),
           ...(cat !== "4" ? { k: cat } : {}),
         });
+      }
+    }
+    if (enModulo) {
+      for (const mc of n.meshes) {
+        if (mc.invisible) continue;
+        emitirMalla({ v: mc.v, i: mc.i, uv: mc.uv }, { m: mc.m, c: mc.c, opacidad: mc.opacidad }, M2, T2, id, anim, cat, n.nombre);
       }
     }
     for (const k of n.kids) caminar(k, env, M2, T2, id, enModulo, anim, cat, enCorr || n.corredera);
@@ -594,6 +929,9 @@ export function interpretarEscena3D(texto: string): Escena3D {
         dim: [env.L ?? 0, env.H ?? 0, env.P ?? 0],
       });
       caminar(k, {}, ID3, [0, 0, 0], k.idEscena, true, null, k.catalogo);
+    } else if (k.objeti === "ZCH" || k.objeti === "ZC") {
+      // Zócalo del cuarto (ZCH, perfiles del 641) o de la cocina (ZC, catálogo 3): se dibuja como cajas.
+      caminar(k, {}, ID3, [0, 0, 0], k.idEscena, true, null, k.objeti === "ZC" ? "3" : "641");
     } else if (k.objeti === "PA") {
       caminar(k, {}, ID3, [0, 0, 0], k.idEscena, false, null, "1");
     } else if (k.objeti === "SL") {
@@ -608,11 +946,12 @@ export function interpretarEscena3D(texto: string): Escena3D {
     ...new Set(
       [
         ...out.cajas.filter((c) => c.m !== "").map((c) => `${c.k ?? catDe.get(c.mod ?? -1) ?? "4"}/${c.m}`),
+        ...out.mallas.filter((q) => q.m !== "").map((q) => `${q.k ?? catDe.get(q.mod ?? -1) ?? "4"}/${q.m}`),
         ...out.paredes.filter((w) => w.m).map((w) => `641/${w.m}`),
         ...(out.materialSuelo ? [`641/${out.materialSuelo}`] : []),
       ],
     ),
   ];
-  out.sinResolver = [...sinResolver].slice(0, 50);
+  out.sinResolver = [...sinResolver, ...omitidas].slice(0, 50);
   return out;
 }

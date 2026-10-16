@@ -41,10 +41,7 @@ export function evaluar(expr: string, env: Entorno): number | null {
     const id = /^[A-Za-z_$][A-Za-z_0-9$]*/.exec(src.slice(i));
     if (id) {
       i += id[0].length;
-      if (src[i] === "(") {
-        fallo = true; // función desconocida
-        return 0;
-      }
+      if (src[i] === "(") return funcion(id[0].toLowerCase());
       const v = env[id[0]];
       if (v === undefined) fallo = true;
       return v ?? 0;
@@ -52,6 +49,76 @@ export function evaluar(expr: string, env: Entorno): number | null {
     fallo = true;
     i++;
     return 0;
+  };
+  // Funciones del .3d: cmp[a;b;op] (1 si se cumple, 0 si no), sin/cos/tan en grados, min, max, abs, sqrt.
+  const funcion = (nombre: string): number => {
+    i++; // "("
+    const cierre = () => {
+      ws();
+      if (src[i] === ")") i++;
+      else fallo = true;
+    };
+    if (nombre === "cmp") {
+      const a = suma();
+      ws();
+      if (src[i] === ";") i++;
+      else fallo = true;
+      const b = suma();
+      ws();
+      if (src[i] === ";") i++;
+      else fallo = true;
+      const op = /^[<>=!]+/.exec(src.slice(i))?.[0] ?? "";
+      i += op.length;
+      cierre();
+      switch (op) {
+        case "=":
+        case "==":
+          return a === b ? 1 : 0;
+        case "<>":
+        case "!=":
+          return a !== b ? 1 : 0;
+        case "<":
+          return a < b ? 1 : 0;
+        case ">":
+          return a > b ? 1 : 0;
+        case "<=":
+          return a <= b ? 1 : 0;
+        case ">=":
+          return a >= b ? 1 : 0;
+        default:
+          fallo = true;
+          return 0;
+      }
+    }
+    const args: number[] = [suma()];
+    ws();
+    while (src[i] === ";" || src[i] === ",") {
+      i++;
+      args.push(suma());
+      ws();
+    }
+    cierre();
+    const rad = (args[0] * Math.PI) / 180;
+    switch (nombre) {
+      case "sin":
+        return Math.sin(rad);
+      case "cos":
+        return Math.cos(rad);
+      case "tan":
+        return Math.tan(rad);
+      case "abs":
+        return Math.abs(args[0]);
+      case "sqrt":
+      case "sqr":
+        return Math.sqrt(args[0]);
+      case "min":
+        return Math.min(...args);
+      case "max":
+        return Math.max(...args);
+      default:
+        fallo = true; // función desconocida
+        return 0;
+    }
   };
   const producto = (): number => {
     let v = primario();

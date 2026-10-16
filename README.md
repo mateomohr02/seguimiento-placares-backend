@@ -164,6 +164,8 @@ Otros comandos útiles:
 | `npm start` | Corre la versión ya compilada (`npm run build` primero) |
 | `npx prisma studio` | Abre una interfaz web para mirar/editar los datos de la base propia a mano |
 | `npx prisma migrate dev --name algo` | Crea y aplica una migración nueva después de cambiar `schema.prisma` |
+| `npm run escenas3d:reinterpretar` | Rehace las escenas 3D guardadas con la versión actual del intérprete, desde el `.3d` original de la base (`-- --todas`, `-- --nombre=26-02568`) |
+| `npm run escenas3d:probar -- <carpeta>` | Corre el intérprete sobre una carpeta de `.3d` (copias, nunca la de TeoWin) e informa tiempo, piezas, tamaño del JSON y problemas; no usa la base |
 | `npm run texturas3d:sincronizar` | Copia a la base todas las texturas de las carpetas de colores de TeoWin (catálogos 4, 3, 658 y decoración 641; ~60 MB; idempotente). Ver `diseño.md` §13.5 |
 | `npm run usuario:sql -- "<nombre>" <rol> <pin>` | Imprime el `INSERT` para dar de alta un usuario (ver [Alta de usuarios](#alta-de-usuarios)) |
 
