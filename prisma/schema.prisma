@@ -364,3 +364,138 @@ model Textura3D {
 
   @@map("textura_3d")
 }
+
+// Seguimiento productivo del área de Termolaminado — feature/seguimiento-termolaminado
+// (diseño.md §14). Tablas nuevas y aditivas; no tocan ninguna existente.
+enum PlanillaEstacion {
+  LIJADO
+  ENCOLADO
+  PVC
+}
+
+enum PlanillaEstado {
+  BORRADOR
+  GUARDADA
+}
+
+enum PlanificacionTipo {
+  PEDIDOS
+  RECLAMOS
+}
+
+// Una planilla por estación y día (`fecha` es el día de la carga). Se completa durante
+// el día como BORRADOR (se guarda sola en el servidor, no se pierde si se cierra la
+// sesión) y se cierra como GUARDADA. Corregir una planilla GUARDADA guarda antes la
+// versión previa en `planilla_version`. `operarios` es la copia de los nombres
+// configurados por técnica al crearla.
+model PlanillaProduccion {
+  id            String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  area          String           @default("TERMOLAMINADO")
+  estacion      PlanillaEstacion
+  fecha         DateTime         @db.Date
+  estado        PlanillaEstado   @default(BORRADOR)
+  operarios     String[]
+  creado_por    String
+  modificado_por String
+  creado_en     DateTime         @default(now())
+  actualizado_en DateTime        @default(now())
+  guardada_en   DateTime?
+
+  filas     PlanillaFila[]
+  versiones PlanillaVersion[]
+
+  @@unique([area, estacion, fecha])
+  @@index([fecha])
+  @@map("planilla_produccion")
+}
+
+// Una fila = un pedido trabajado. `pedido_codigo` es el texto cargado (mayúsculas);
+// `pedido_id` solo se completa si coincide exactamente con un pedido sincronizado.
+// En PVC `cantidad_piezas` = mesa_chica + mesa_grande (lo calcula el backend).
+model PlanillaFila {
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  planilla_id     String   @db.Uuid
+  orden           Int
+  hora_inicio     String?
+  hora_fin        String?
+  pedido_codigo   String   @default("")
+  pedido_id       String?  @db.Uuid
+  cantidad_piezas Int?
+  observaciones   String?
+  colocacion_pvc  String?
+  perfilado       String?
+  colores         String?
+  mesa_chica      Int?
+  mesa_grande     Int?
+
+  planilla PlanillaProduccion @relation(fields: [planilla_id], references: [id], onDelete: Cascade)
+  fotos    PlanillaFoto[]
+
+  @@index([planilla_id])
+  @@index([pedido_codigo])
+  @@map("planilla_fila")
+}
+
+// Foto de la pieza antes de termolaminar (filas de PVC). Archivo en bytea, borrado lógico.
+model PlanillaFoto {
+  id           String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  fila_id      String    @db.Uuid
+  mime         String
+  tamano       Int
+  contenido    Bytes
+  creado_en    DateTime  @default(now())
+  eliminado_en DateTime?
+
+  fila PlanillaFila @relation(fields: [fila_id], references: [id], onDelete: Cascade)
+
+  @@index([fila_id])
+  @@map("planilla_foto")
+}
+
+// Versión previa de una planilla GUARDADA, tomada justo antes de aplicar una corrección.
+model PlanillaVersion {
+  id            String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  planilla_id   String   @db.Uuid
+  version       Int
+  datos         Json
+  guardada_por  String
+  guardada_en   DateTime
+  reemplazada_por String
+  reemplazada_en DateTime @default(now())
+
+  planilla PlanillaProduccion @relation(fields: [planilla_id], references: [id], onDelete: Cascade)
+
+  @@unique([planilla_id, version])
+  @@map("planilla_version")
+}
+
+// Operarios de un área de trabajo (los configura técnica); salen en el encabezado de las planillas.
+model AreaOperario {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  area      String
+  nombre    String
+  orden     Int      @default(0)
+  creado_en DateTime @default(now())
+
+  @@unique([area, nombre])
+  @@map("area_operario")
+}
+
+// Planificación semanal que baja la oficina técnica (pedidos o reclamos), como archivo
+// (PDF o imagen). Hoy es una por semana para toda el área; `semana_inicio` es el lunes.
+model PlanificacionSemanal {
+  id             String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  area           String            @default("TERMOLAMINADO")
+  tipo           PlanificacionTipo
+  semana_inicio  DateTime          @db.Date
+  nombre         String
+  nombre_archivo String
+  mime           String
+  tamano         Int
+  contenido      Bytes
+  creado_en      DateTime          @default(now())
+  eliminado_en   DateTime?
+
+  @@index([area, semana_inicio])
+  @@map("planificacion_semanal")
+}

@@ -88,6 +88,8 @@ app/backend/
 │       ├── planos-pedido/      # Planos por pedido (imagen JPG/PNG/WEBP o PDF), módulo opcional + anotaciones
 │       ├── escenas-pedido/     # Escenas 3D por pedido (.3d de TeoWin): solo lectura, sin anotaciones. parser/ interpreta el .3d a una geometría liviana (regla 10)
 │       ├── texturas-3d/        # Texturas de los materiales de las escenas 3D, por catálogo (copiadas de la carpeta de TeoWin a la base)
+│       ├── planillas/          # Planillas de producción de Termolaminado (Lijado, Encolado, PVC): borrador/guardada, versiones, fotos, operarios, tabla, indicadores y trazabilidad (regla 11)
+│       ├── planificacion/      # Planificación semanal (pedidos y reclamos) de Termolaminado: PDF o imagen que sube técnica (regla 11)
 │       ├── auth/                # Login por PIN, sesión (token firmado), middlewares autenticar / requierePermiso y claves de permiso
 │       └── sync/                # Las queries de solo-lectura contra TeoWin + agrupar-despiece.ts (cuántas piezas físicas es cada fila)
 ├── scripts/
@@ -346,6 +348,18 @@ Antes había botones y endpoints manuales para finalizar módulos y pedidos y pa
 - **Texturas** (`texturas-3d`): al subir una escena, el backend copia a la tabla `textura_3d` la textura de cada material (`escena.materiales`, como `catálogo/código`) desde `TEOWIN_3D_DIR`; si el disco no responde, la carga de la escena **no falla**. Los colores de un mueble se buscan en el catálogo del mueble (4 Placares, 3 Cocinas); paredes y piso, en el 641 (decoración). El visor pide cada textura por `GET /api/texturas-3d/:catalogo/:material` (se copia sola la primera vez). Detalle y límites: `diseño.md` §13.5.
 - Subir `PARSER_VERSION` cuando cambie el formato de salida del intérprete y rehacer las escenas guardadas con `npm run escenas3d:reinterpretar`. La salida incluye `cajas`, `mallas` (cortinas, tubos, bachas…), `paredes` (con huecos) y `animaciones`. Los objetos `esBiblioteca` se leen de `TEOWIN_3D_DIR` (solo lectura). `npm run escenas3d:probar -- <carpeta>` prueba el intérprete contra copias de `.3d` sin tocar la base.
 
+### 11. Seguimiento de Termolaminado (planillas)
+
+Detalle completo en `diseño.md` §14. Lo que hay que tener presente al tocar el módulo `planillas`:
+
+- **Una planilla por estación y día** (`LIJADO`, `ENCOLADO`, `PVC`; única por `area + estacion + fecha`). El formulario manda siempre el estado completo con `PUT /planillas/dia/:estacion/:fecha` (upsert): sirve para el guardado automático del borrador (`estado: BORRADOR`) y para cerrarla o corregirla (`estado: GUARDADA`). Las filas llevan su `id` una vez creadas; las que no se mandan se borran (con sus fotos).
+- **Corregir una `GUARDADA`** guarda antes la versión previa en `planilla_version` (con quién la guardó/reemplazó y cuándo). Una `GUARDADA` no vuelve a `BORRADOR` (`409`). Un `BORRADOR` acepta filas incompletas; al guardar, cada fila necesita pedido, hora de inicio y cantidad (en PVC, mesa chica y/o grande).
+- **PVC**: `cantidad_piezas` = `mesa_chica + mesa_grande`, calculada por el backend; `colores` en mayúsculas y sin puntos; solo las filas de PVC aceptan fotos (hasta 12 por fila, JPG/PNG/WEBP por firma, máx. 8 MB, `bytea`, borrado lógico).
+- **N° de pedido**: texto libre en mayúsculas; si coincide exactamente con un pedido sincronizado se guarda también `pedido_id`.
+- **Operarios** (`area_operario`): los configura técnica (`planillas.configurar`); se copian a la planilla al crearla.
+- **Planificación semanal** (`planificacion_semanal`): PDF o imagen por semana (lunes) y tipo (`PEDIDOS` / `RECLAMOS`), subida por técnica con `documentacion.gestionar`; ver con `documentacion.ver`.
+- Esta feature **no lee ni escribe en TeoWin**. Permisos: `planillas.completar`, `planillas.ver`, `planillas.configurar` (tabla de la regla 9).
+
 ### 9. Usuarios, roles y permisos
 
 Todo `/api/*` exige sesión salvo `GET /api/health` y `POST /api/auth/login`. Cada ruta, además, declara el permiso que necesita (`requierePermiso(PERMISOS.…)` en su router).
@@ -369,6 +383,11 @@ Todo `/api/*` exige sesión salvo `GET /api/health` y `POST /api/auth/login`. Ca
 | `documentacion.gestionar` | Subir y eliminar hojas de corte, documentos y planos | ✔ | ✔ | — | — |
 | `ordenes.gestionar` | Agregar, archivar y eliminar órdenes | ✔ | ✔ | — | — |
 | `usuarios.gestionar` | Alta y baja de usuarios (previsto; hoy se hace por base) | ✔ | ✔ | — | — |
+| `planillas.completar` | Completar, guardar y corregir las planillas de producción de Termolaminado y sus fotos | ✔ | ✔ | ✔ | — |
+| `planillas.ver` | Ver registros, indicadores y trazabilidad de las planillas | ✔ | ✔ | ✔ | ✔ |
+| `planillas.configurar` | Configurar los operarios del área | ✔ | ✔ | — | — |
+
+La planificación semanal de Termolaminado no tiene permiso propio: usa `documentacion.ver` (ver) y `documentacion.gestionar` (subir y eliminar). Ojo: hoy **todo usuario `fabrica`** recibe `planillas.completar` (no hay un rol solo de Termolaminado).
 
 Los usuarios `fabrica` son las estaciones de trabajo (`cortadora1`, `rover1`, `armado1`, …); `gerencia` queda previsto para un panel de información futuro. Ver `diseño.md` §12 para los motivos.
 
@@ -494,6 +513,31 @@ Mismo esquema que las hojas de corte, colgando del pedido.
 |---|---|---|
 | `GET /texturas-3d/:catalogo/:material` | Imagen de la textura del material en ese catálogo (`documentacion.ver`). La copia desde la carpeta de TeoWin la primera vez | binario `image/jpeg` o `image/png`. `404` si no existe |
 | `POST /texturas-3d/:catalogo/:material` | Alta o reemplazo manual (`documentacion.gestionar`). **Body: la imagen cruda** (`image/jpeg` o `image/png`, máx. 8 MB, se verifica la firma) | `data`: `{ clave, tamano }` |
+
+### Planillas de Termolaminado
+
+Todas bajo `/api/planillas`. `estacion` es `lijado`, `encolado` o `pvc`; `fecha`, `AAAA-MM-DD`.
+
+| Método y ruta | Permiso | Qué hace |
+|---|---|---|
+| `GET /planillas/dia/:estacion/:fecha` | `planillas.ver` | La planilla de ese día con sus filas, fotos (metadatos) y versiones; `data: null` si no existe |
+| `PUT /planillas/dia/:estacion/:fecha` | `planillas.completar` | Crea o actualiza con `{ estado: "BORRADOR" \| "GUARDADA", filas: [{ id?, hora_inicio, hora_fin, pedido_codigo, cantidad_piezas, observaciones, colocacion_pvc, perfilado, colores, mesa_chica, mesa_grande }] }`. `400` (datos inválidos, mensaje legible), `409` (una guardada no vuelve a borrador) |
+| `GET /planillas/:id` · `GET /planillas/versiones/:id` | `planillas.ver` | Detalle de una planilla / una versión previa (`datos`) |
+| `GET /planillas/registros?desde&hasta&estacion&estado&pedido` | `planillas.ver` | Tabla cruda: una fila por registro con `fotos` (cantidad) y `versiones`. Por defecto, los últimos 30 días |
+| `GET /planillas/indicadores?desde&hasta` | `planillas.ver` | Por estación, por día y estado de los pedidos del período |
+| `GET /planillas/trazabilidad?pedido=` | `planillas.ver` | Recorrido de un pedido por las tres estaciones |
+| `GET /planillas/pedidos-sugeridos?q=` · `GET /planillas/colores` | `planillas.ver` | Autocompletado de N° de pedido y de códigos de color |
+| `GET`/`PUT /planillas/operarios` | `planillas.ver` / `planillas.configurar` | Operarios del área: `{ operarios: ["Fabián", "Carlos"] }` (hasta 10) |
+| `POST /planillas/filas/:filaId/fotos` | `planillas.completar` | **Body: la imagen cruda** (`image/jpeg`, `png` o `webp`). Solo filas de PVC. `201`: `{ id, mime, tamano, creado_en }` |
+| `GET`/`DELETE /planillas/fotos/:fotoId` | `planillas.ver` / `planillas.completar` | Imagen / borrado lógico |
+
+### Planificación semanal de Termolaminado
+
+| Método y ruta | Permiso | Qué hace |
+|---|---|---|
+| `GET /planificacion` | `documentacion.ver` | Documentos recientes (sin el archivo): `{ id, tipo, semana_inicio, nombre, nombre_archivo, mime, tamano, creado_en }` |
+| `POST /planificacion?tipo=PEDIDOS\|RECLAMOS&semana=AAAA-MM-DD&nombre=&archivo=` | `documentacion.gestionar` | **Body: el archivo crudo** (PDF o imagen; la semana se normaliza a su lunes). `400`, `413` (más de 40 MB), `415` |
+| `GET /planificacion/:id/archivo` · `DELETE /planificacion/:id` | `documentacion.ver` / `documentacion.gestionar` | Archivo / borrado lógico |
 
 ### Piezas
 

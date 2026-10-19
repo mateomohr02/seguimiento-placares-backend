@@ -9,6 +9,9 @@ export const PERMISOS = {
   DOCUMENTACION_GESTIONAR: "documentacion.gestionar",
   ORDENES_GESTIONAR: "ordenes.gestionar",
   USUARIOS_GESTIONAR: "usuarios.gestionar",
+  PLANILLAS_COMPLETAR: "planillas.completar",
+  PLANILLAS_VER: "planillas.ver",
+  PLANILLAS_CONFIGURAR: "planillas.configurar",
 } as const;
 
 export type Permiso = (typeof PERMISOS)[keyof typeof PERMISOS];
