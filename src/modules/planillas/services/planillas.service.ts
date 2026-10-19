@@ -173,7 +173,7 @@ async function pedidosPorCodigo(codigos: string[]) {
  * el formulario (se usa tanto para el guardado automático del borrador como para cerrarla
  * o corregirla). Corregir una planilla GUARDADA guarda antes la versión previa.
  */
-export async function guardarPlanilla(estacion: Estacion, fechaStr: string, body: PlanillaBody, usuario: string) {
+export async function guardarPlanilla(estacion: Estacion, fechaStr: string, body: PlanillaBody, usuario: string, usuarioId: string) {
   const fecha = parseFecha(fechaStr);
   validarHoras(body.filas);
   if (body.estado === "GUARDADA") validarGuardada(estacion, body.filas);
@@ -217,10 +217,10 @@ export async function guardarPlanilla(estacion: Estacion, fechaStr: string, body
 
     // Los operarios se eligen a mano para cada planilla y se guardan como nombre: lo que cambie
     // después en la lista del área no altera las planillas ya creadas.
-    const pool = new Set((await tx.areaOperario.findMany({ where: { area: AREA_TERMOLAMINADO }, select: { nombre: true } })).map((o) => o.nombre));
+    const pool = new Set((await tx.usuarioOperario.findMany({ where: { usuario_id: usuarioId }, select: { nombre: true } })).map((o) => o.nombre));
     const elegidos = [...new Set(body.operarios)];
     for (const n of elegidos) {
-      if (!pool.has(n) && !existente.operarios.includes(n)) throw new AppError(`El operario "${n}" no está en la lista del área.`, 400);
+      if (!pool.has(n) && !existente.operarios.includes(n)) throw new AppError(`El operario "${n}" no está entre los operarios de tu estación.`, 400);
     }
 
     const planillaId = existente.id;

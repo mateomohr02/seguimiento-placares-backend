@@ -356,9 +356,9 @@ Detalle completo en `diseño.md` §14. Lo que hay que tener presente al tocar el
 - **Corregir una `GUARDADA`** guarda antes la versión previa en `planilla_version` (con quién la guardó/reemplazó y cuándo). Una `GUARDADA` no vuelve a `BORRADOR` (`409`). Un `BORRADOR` acepta filas incompletas; al guardar, cada fila necesita pedido, hora de inicio y cantidad (en PVC, mesa chica y/o grande).
 - **PVC**: `cantidad_piezas` = `mesa_chica + mesa_grande`, calculada por el backend; `colores` en mayúsculas y sin puntos; solo las filas de PVC aceptan fotos (hasta 12 por fila, JPG/PNG/WEBP por firma, máx. 8 MB, `bytea`, borrado lógico).
 - **N° de pedido**: texto libre en mayúsculas; si coincide exactamente con un pedido sincronizado se guarda también `pedido_id`.
-- **Acceso por usuario** (`usuario_planilla`): técnica asigna a cada usuario las planillas (Lijado, Encolado, PVC) que completa, desde `/planillas/configuracion`; la sesión (`GET /auth/me`) devuelve `planillas`. `PUT /planillas/dia/...` y las fotos devuelven `403` si la estación no está asignada. Sin asignación, ninguna.
-- **Operarios** (`area_operario`): lista del área que configura técnica (`planillas.configurar`); en cada planilla se eligen a mano (`operarios` en el `PUT`, deben estar en la lista o ya estar en la planilla) y se guardan como nombre, así que cambiar la lista no altera las planillas existentes.
-- **Planificación semanal** (`planificacion_semanal`): PDF o imagen por semana (lunes) y tipo (`PEDIDOS` / `RECLAMOS`), subida por técnica con `documentacion.gestionar`; ver con `documentacion.ver`.
+- **Configuración por usuario** (la hace técnica, `planillas.configurar`): `usuario_planilla` (planillas que completa; `PUT /planillas/dia/...` y las fotos devuelven `403` si la estación no está asignada), `usuario_estado_produccion` (el estado que marca en la planificación; un estado puede repetirse entre usuarios) y `usuario_operario` (sus operarios). La sesión (`GET /auth/me`) devuelve `planillas`.
+- **Operarios**: los de **su estación** (`usuario_operario`); en cada planilla se eligen a mano (`operarios` en el `PUT`, deben ser los del usuario o estar ya en la planilla) y se guardan como nombre, así que cambiar la lista no altera las planillas existentes.
+- **Planificación semanal por sistema** (`planificacion_item`, `planificacion_marca`, `estado_produccion`): técnica (`documentacion.gestionar`) carga a mano las filas de pedidos y reclamos de cada semana (lunes); quien tiene un estado de producción asignado marca/desmarca ese estado en cada fila (`PUT /planificacion/items/:id/marca`). Ver con `documentacion.ver`. Ya no hay carga de PDF/imagen.
 - Esta feature **no lee ni escribe en TeoWin**. Permisos: `planillas.completar`, `planillas.ver`, `planillas.indicadores`, `planillas.configurar` (tabla de la regla 9).
 
 ### 9. Usuarios, roles y permisos
@@ -387,7 +387,7 @@ Todo `/api/*` exige sesión salvo `GET /api/health` y `POST /api/auth/login`. Ca
 | `planillas.completar` | Completar, guardar y corregir las planillas de producción de Termolaminado y sus fotos | ✔ | ✔ | ✔ | — |
 | `planillas.ver` | Ver registros, indicadores y trazabilidad de las planillas | ✔ | ✔ | ✔ | ✔ |
 | `planillas.indicadores` | Ver los indicadores de producción de Termolaminado | ✔ | ✔ | — | ✔ |
-| `planillas.configurar` | Configurar los operarios del área | ✔ | ✔ | — | — |
+| `planillas.configurar` | Configurar estados de producción, planillas y operarios de cada usuario | ✔ | ✔ | — | — |
 
 La planificación semanal de Termolaminado no tiene permiso propio: usa `documentacion.ver` (ver) y `documentacion.gestionar` (subir y eliminar). Ojo: hoy **todo usuario `fabrica`** recibe `planillas.completar` (no hay un rol solo de Termolaminado).
 
@@ -529,8 +529,9 @@ Todas bajo `/api/planillas`. `estacion` es `lijado`, `encolado` o `pvc`; `fecha`
 | `GET /planillas/indicadores?desde&hasta` | `planillas.indicadores` | Por estación, por día y estado de los pedidos del período |
 | `GET /planillas/trazabilidad?pedido=` | `planillas.ver` | Recorrido de un pedido por las tres estaciones |
 | `GET /planillas/pedidos-sugeridos?q=` · `GET /planillas/colores` | `planillas.ver` | Autocompletado de N° de pedido y de códigos de color |
-| `GET /planillas/accesos` · `PUT /planillas/accesos/:usuarioId` | `planillas.configurar` | Qué planillas completa cada usuario: `{ estaciones: ["LIJADO","ENCOLADO","PVC"] }` |
-| `GET`/`PUT /planillas/operarios` | `planillas.ver` / `planillas.configurar` | Operarios del área: `{ operarios: ["Fabián", "Carlos"] }` (hasta 10) |
+| `GET /planillas/accesos` · `PUT /planillas/accesos/:usuarioId` | `planillas.configurar` | Configuración por usuario: `{ estaciones: ["LIJADO","ENCOLADO","PVC"], estado_id, operarios: ["Fabián"] }` |
+| `GET`/`PUT /planillas/estados` | `planillas.configurar` | Catálogo de estados de producción: `{ estados: [{ id?, nombre }] }` (`409` si se quita uno asignado o con marcas) |
+| `GET /planillas/operarios` | `planillas.ver` | Los operarios de la estación del usuario: `{ operarios: ["Fabián", "Carlos"] }` |
 | `POST /planillas/filas/:filaId/fotos` | `planillas.completar` | **Body: la imagen cruda** (`image/jpeg`, `png` o `webp`). Solo filas de PVC. `201`: `{ id, mime, tamano, creado_en }` |
 | `GET`/`DELETE /planillas/fotos/:fotoId` | `planillas.ver` / `planillas.completar` | Imagen / borrado lógico |
 
@@ -538,9 +539,9 @@ Todas bajo `/api/planillas`. `estacion` es `lijado`, `encolado` o `pvc`; `fecha`
 
 | Método y ruta | Permiso | Qué hace |
 |---|---|---|
-| `GET /planificacion` | `documentacion.ver` | Documentos recientes (sin el archivo): `{ id, tipo, semana_inicio, nombre, nombre_archivo, mime, tamano, creado_en }` |
-| `POST /planificacion?tipo=PEDIDOS\|RECLAMOS&semana=AAAA-MM-DD&nombre=&archivo=` | `documentacion.gestionar` | **Body: el archivo crudo** (PDF o imagen; la semana se normaliza a su lunes). `400`, `413` (más de 40 MB), `415` |
-| `GET /planificacion/:id/archivo` · `DELETE /planificacion/:id` | `documentacion.ver` / `documentacion.gestionar` | Archivo / borrado lógico |
+| `GET /planificacion?semana=AAAA-MM-DD` | `documentacion.ver` | La semana (por defecto la actual; se normaliza a su lunes): `{ semana_inicio, semanas[], estados[], mi_estado, items[] }`, cada fila con sus `marcas` (estado, quién, cuándo) |
+| `POST /planificacion/items` · `PUT /planificacion/items/:id` · `DELETE /planificacion/items/:id` | `documentacion.gestionar` | Alta, edición y baja lógica de una fila. Body: `{ tipo: "PEDIDOS" \| "RECLAMOS", semana, cliente, n_tw, n_orden, modelo, color, fabrica, fecha_limite, distribuidor, ticket, tipo_reclamo, compromiso, finalizado_en, observaciones }` (hace falta cliente o N° TW) |
+| `PUT /planificacion/items/:id/marca` | `documentacion.ver` + estado asignado | `{ marcado: true \| false }`: marca o quita el estado de producción del usuario en la fila (`403` si no tiene estado asignado) |
 
 ### Piezas
 

@@ -1,115 +1,85 @@
-import express, { Router } from "express";
+import { Router } from "express";
 import { z } from "zod";
-import { prisma } from "../../config/prisma";
 import { catchAsync } from "../../utils/catchAsync";
 import { sendResponse } from "../../utils/ApiResponse";
 import { AppError } from "../../utils/AppError";
 import { parseIdParam } from "../../utils/parseIdParam";
 import { requierePermiso } from "../auth/auth.middleware";
 import { PERMISOS } from "../auth/permisos";
-import { AREA_TERMOLAMINADO, fechaISO, parseFecha } from "../planillas/schemas/planilla.schema";
-import { mimePorFirma } from "../planillas/services/fotos-operarios.service";
+import { actualizarItem, crearItem, eliminarItem, getSemana, marcarEstado } from "./planificacion.service";
 
-// Planificación semanal del área (pedidos y reclamos) que baja la oficina técnica, como
-// archivo PDF o imagen (diseño.md §14.4). Se reutilizan los permisos de documentación:
-// ver = documentacion.ver; subir y eliminar = documentacion.gestionar.
-export const MAX_PLANIFICACION_BYTES = 40 * 1024 * 1024;
-const MIMES = ["application/pdf", "image/jpeg", "image/png", "image/webp"];
-
+// Planificación semanal de Termolaminado cargada por sistema (diseño.md §14.4), montada en /api/planificacion.
+// Ver: documentacion.ver. Cargar, editar y quitar filas: documentacion.gestionar (técnica). Marcar el estado de
+// producción de una fila: cualquier usuario con un estado asignado (lo configura técnica).
 export const planificacionRouter = Router();
 
-// Lunes de la semana de una fecha (la semana de producción va de lunes a viernes).
-function lunesDe(d: Date): Date {
-  const dow = (d.getUTCDay() + 6) % 7; // lunes = 0
-  return new Date(d.getTime() - dow * 86_400_000);
+const texto = (max: number) =>
+  z.preprocess((v) => (typeof v === "string" && v.trim() !== "" ? v.trim() : null), z.string().max(max).nullable());
+const fechaOpc = z.preprocess((v) => (v === "" || v === undefined ? null : v), z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "debe tener el formato AAAA-MM-DD").nullable());
+
+const ItemSchema = z
+  .object({
+    tipo: z.enum(["PEDIDOS", "RECLAMOS"]),
+    semana: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "La semana debe tener el formato AAAA-MM-DD."),
+    cliente: z.preprocess((v) => (typeof v === "string" ? v.trim() : ""), z.string().max(120)),
+    n_tw: z.preprocess((v) => (typeof v === "string" ? v.trim().toUpperCase() : ""), z.string().max(40)),
+    n_orden: texto(40),
+    modelo: texto(80),
+    color: texto(80),
+    fabrica: fechaOpc,
+    fecha_limite: fechaOpc,
+    distribuidor: texto(80),
+    ticket: texto(40),
+    tipo_reclamo: texto(200),
+    compromiso: fechaOpc,
+    finalizado_en: fechaOpc,
+    observaciones: texto(500),
+  })
+  .refine((i) => i.cliente !== "" || i.n_tw !== "", { message: "Cargá al menos el cliente o el N° TW." });
+
+function parsearItem(body: unknown) {
+  const r = ItemSchema.safeParse(body);
+  if (r.success) return r.data;
+  const issue = r.error.issues[0];
+  const campo = issue.path[0] ? `${String(issue.path[0])}: ` : "";
+  throw new AppError(`${campo}${issue.message}`, 400);
 }
 
-const meta = {
-  id: true,
-  tipo: true,
-  semana_inicio: true,
-  nombre: true,
-  nombre_archivo: true,
-  mime: true,
-  tamano: true,
-  creado_en: true,
-} as const;
-
 planificacionRouter.get(
   "/",
   requierePermiso(PERMISOS.DOCUMENTACION_VER),
-  catchAsync(async (_req, res) => {
-    const docs = await prisma.planificacionSemanal.findMany({
-      where: { area: AREA_TERMOLAMINADO, eliminado_en: null },
-      select: meta,
-      orderBy: [{ semana_inicio: "desc" }, { tipo: "asc" }, { creado_en: "desc" }],
-      take: 60,
-    });
-    return sendResponse(res, 200, docs.map((d) => ({ ...d, semana_inicio: fechaISO(d.semana_inicio), creado_en: d.creado_en.toISOString() })));
+  catchAsync(async (req, res) => {
+    const semana = typeof req.query.semana === "string" && req.query.semana !== "" ? req.query.semana : undefined;
+    return sendResponse(res, 200, await getSemana(semana, req.usuario!.id));
   }),
 );
-
-const SubirQuery = z.object({
-  tipo: z.enum(["PEDIDOS", "RECLAMOS"]),
-  semana: z.string(),
-  nombre: z.string().trim().max(80).optional(),
-  archivo: z.string().trim().min(1).max(255),
-});
 
 planificacionRouter.post(
-  "/",
+  "/items",
   requierePermiso(PERMISOS.DOCUMENTACION_GESTIONAR),
-  express.raw({ type: MIMES, limit: MAX_PLANIFICACION_BYTES }),
-  catchAsync(async (req, res) => {
-    const q = SubirQuery.parse(req.query);
-    if (!Buffer.isBuffer(req.body) || req.body.length === 0) throw new AppError("Se esperaba un PDF o una imagen (JPG, PNG, WEBP).", 415);
-    const esPdf = req.body.subarray(0, 1024).includes("%PDF-");
-    const mime = esPdf ? "application/pdf" : mimePorFirma(req.body);
-    if (!mime) throw new AppError("El archivo no es un PDF ni una imagen válida.", 400);
-    const semana = lunesDe(parseFecha(q.semana, "La semana"));
-    const doc = await prisma.planificacionSemanal.create({
-      data: {
-        area: AREA_TERMOLAMINADO,
-        tipo: q.tipo,
-        semana_inicio: semana,
-        nombre: q.nombre || (q.tipo === "PEDIDOS" ? "Planificación de pedidos" : "Reclamos"),
-        nombre_archivo: q.archivo,
-        mime,
-        tamano: req.body.length,
-        contenido: req.body,
-      },
-      select: meta,
-    });
-    return sendResponse(res, 201, { ...doc, semana_inicio: fechaISO(doc.semana_inicio), creado_en: doc.creado_en.toISOString() });
-  }),
+  catchAsync(async (req, res) => sendResponse(res, 201, await crearItem(parsearItem(req.body)))),
 );
 
-planificacionRouter.get(
-  "/:id/archivo",
-  requierePermiso(PERMISOS.DOCUMENTACION_VER),
-  catchAsync(async (req, res) => {
-    const d = await prisma.planificacionSemanal.findUnique({
-      where: { id: parseIdParam(String(req.params.id)) },
-      select: { contenido: true, mime: true, nombre_archivo: true, eliminado_en: true },
-    });
-    if (!d || d.eliminado_en) throw new AppError("Documento no encontrado.", 404);
-    res.setHeader("Content-Type", d.mime);
-    res.setHeader("Content-Length", d.contenido.length);
-    res.setHeader("X-Content-Type-Options", "nosniff");
-    res.setHeader("Content-Disposition", `inline; filename*=UTF-8''${encodeURIComponent(d.nombre_archivo)}`);
-    res.setHeader("Cache-Control", "private, max-age=300");
-    res.end(Buffer.from(d.contenido));
-  }),
+planificacionRouter.put(
+  "/items/:id",
+  requierePermiso(PERMISOS.DOCUMENTACION_GESTIONAR),
+  catchAsync(async (req, res) => sendResponse(res, 200, await actualizarItem(parseIdParam(String(req.params.id)), parsearItem(req.body)))),
 );
 
 planificacionRouter.delete(
-  "/:id",
+  "/items/:id",
   requierePermiso(PERMISOS.DOCUMENTACION_GESTIONAR),
   catchAsync(async (req, res) => {
-    const id = parseIdParam(String(req.params.id));
-    const d = await prisma.planificacionSemanal.findUnique({ where: { id }, select: { eliminado_en: true } });
-    if (!d || d.eliminado_en) throw new AppError("Documento no encontrado.", 404);
-    await prisma.planificacionSemanal.update({ where: { id }, data: { eliminado_en: new Date() } });
+    await eliminarItem(parseIdParam(String(req.params.id)));
     return sendResponse(res, 200, null);
+  }),
+);
+
+planificacionRouter.put(
+  "/items/:id/marca",
+  requierePermiso(PERMISOS.DOCUMENTACION_VER),
+  catchAsync(async (req, res) => {
+    const { marcado } = z.object({ marcado: z.boolean() }).parse(req.body);
+    return sendResponse(res, 200, await marcarEstado(parseIdParam(String(req.params.id)), req.usuario!.id, req.usuario!.nombre, marcado));
   }),
 );

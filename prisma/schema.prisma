@@ -323,6 +323,8 @@ model Usuario {
 
   rol Rol @relation(fields: [rol_id], references: [id])
   planillas UsuarioPlanilla[]
+  operarios UsuarioOperario[]
+  estadoProduccion UsuarioEstadoProduccion?
 
   @@index([rol_id])
   @@map("usuario")
@@ -482,33 +484,88 @@ model PlanillaVersion {
   @@map("planilla_version")
 }
 
-// Operarios de un área de trabajo (los configura técnica); salen en el encabezado de las planillas.
-model AreaOperario {
+// Operarios que trabajan en la estación de un usuario de fábrica (los configura técnica): salen
+// como opciones al completar sus planillas. Se guardan por nombre.
+model UsuarioOperario {
+  id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  usuario_id String   @db.Uuid
+  nombre     String
+  orden      Int      @default(0)
+  creado_en  DateTime @default(now())
+
+  usuario Usuario @relation(fields: [usuario_id], references: [id], onDelete: Cascade)
+
+  @@unique([usuario_id, nombre])
+  @@map("usuario_operario")
+}
+
+// Estados de producción que define técnica (ej. "Listo Termolaminado"). A cada usuario de fábrica
+// se le asigna uno (puede repetirse entre usuarios): es el que marca en la planificación.
+model EstadoProduccion {
   id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  area      String
-  nombre    String
+  nombre    String   @unique
   orden     Int      @default(0)
   creado_en DateTime @default(now())
 
-  @@unique([area, nombre])
-  @@map("area_operario")
+  usuarios UsuarioEstadoProduccion[]
+  marcas   PlanificacionMarca[]
+
+  @@map("estado_produccion")
 }
 
-// Planificación semanal que baja la oficina técnica (pedidos o reclamos), como archivo
-// (PDF o imagen). Hoy es una por semana para toda el área; `semana_inicio` es el lunes.
-model PlanificacionSemanal {
-  id             String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  area           String            @default("TERMOLAMINADO")
-  tipo           PlanificacionTipo
-  semana_inicio  DateTime          @db.Date
-  nombre         String
-  nombre_archivo String
-  mime           String
-  tamano         Int
-  contenido      Bytes
-  creado_en      DateTime          @default(now())
-  eliminado_en   DateTime?
+model UsuarioEstadoProduccion {
+  usuario_id String @id @db.Uuid
+  estado_id  String @db.Uuid
 
-  @@index([area, semana_inicio])
-  @@map("planificacion_semanal")
+  usuario Usuario          @relation(fields: [usuario_id], references: [id], onDelete: Cascade)
+  estado  EstadoProduccion @relation(fields: [estado_id], references: [id], onDelete: Restrict)
+
+  @@index([estado_id])
+  @@map("usuario_estado_produccion")
+}
+
+// Planificación semanal que carga técnica a mano: una fila por pedido (o por reclamo). Los pedidos usan
+// cliente / n_tw / n_orden / modelo / color / fabrica / fecha_limite; los reclamos, cliente / distribuidor /
+// ticket / n_tw / tipo_reclamo / color / compromiso / finalizado_en / observaciones. `semana_inicio` es el
+// lunes. Borrado lógico.
+model PlanificacionItem {
+  id            String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  area          String            @default("TERMOLAMINADO")
+  tipo          PlanificacionTipo
+  semana_inicio DateTime          @db.Date
+  orden         Int               @default(0)
+  cliente       String            @default("")
+  n_tw          String            @default("")
+  n_orden       String?
+  modelo        String?
+  color         String?
+  fabrica       DateTime?         @db.Date
+  fecha_limite  DateTime?         @db.Date
+  distribuidor  String?
+  ticket        String?
+  tipo_reclamo  String?
+  compromiso    DateTime?         @db.Date
+  finalizado_en DateTime?         @db.Date
+  observaciones String?
+  creado_en     DateTime          @default(now())
+  eliminado_en  DateTime?
+
+  marcas PlanificacionMarca[]
+
+  @@index([area, semana_inicio, tipo])
+  @@map("planificacion_item")
+}
+
+// Un estado de producción marcado en una fila de la planificación, por el usuario que lo tiene asignado.
+model PlanificacionMarca {
+  item_id     String   @db.Uuid
+  estado_id   String   @db.Uuid
+  marcado_por String
+  marcado_en  DateTime @default(now())
+
+  item   PlanificacionItem @relation(fields: [item_id], references: [id], onDelete: Cascade)
+  estado EstadoProduccion  @relation(fields: [estado_id], references: [id], onDelete: Cascade)
+
+  @@id([item_id, estado_id])
+  @@map("planificacion_marca")
 }

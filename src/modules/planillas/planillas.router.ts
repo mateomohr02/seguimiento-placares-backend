@@ -23,14 +23,18 @@ import {
   eliminarFoto,
   estacionDeFila,
   estacionDeFoto,
-  guardarAccesos,
-  listarAccesos,
   getFoto,
-  guardarOperarios,
-  listarOperarios,
   MAX_FOTO_BYTES,
   MIMES_FOTO,
 } from "./services/fotos-operarios.service";
+import {
+  guardarConfiguracionUsuario,
+  guardarEstados,
+  listarConfiguracionUsuarios,
+  listarEstados,
+  MAX_OPERARIOS,
+  operariosDe,
+} from "./services/configuracion-usuarios.service";
 
 // Planillas de producción de Termolaminado (diseño.md §14). Montado en /api/planillas.
 // Ver (tabla, indicadores, trazabilidad): planillas.ver. Completar y corregir: planillas.completar.
@@ -58,7 +62,7 @@ planillasRouter.put(
     const estacion = parseEstacion(String(req.params.estacion));
     exigirAcceso(req.usuario!.planillas, estacion);
     const body = parsearPlanillaBody(req.body);
-    const planilla = await guardarPlanilla(estacion, String(req.params.fecha), body, req.usuario!.nombre);
+    const planilla = await guardarPlanilla(estacion, String(req.params.fecha), body, req.usuario!.nombre, req.usuario!.id);
     return sendResponse(res, 200, planilla);
   }),
 );
@@ -108,35 +112,51 @@ planillasRouter.get(
   catchAsync(async (_req, res) => sendResponse(res, 200, await coloresUsados())),
 );
 
+// Los operarios entre los que elige el usuario que completa la planilla (los configura técnica por usuario).
 planillasRouter.get(
   "/operarios",
   requierePermiso(PERMISOS.PLANILLAS_VER),
-  catchAsync(async (_req, res) => sendResponse(res, 200, await listarOperarios())),
+  catchAsync(async (req, res) => sendResponse(res, 200, { operarios: await operariosDe(req.usuario!.id) })),
 );
 
-planillasRouter.put(
-  "/operarios",
-  requierePermiso(PERMISOS.PLANILLAS_CONFIGURAR),
-  catchAsync(async (req, res) => {
-    const { operarios } = z.object({ operarios: z.array(z.string().max(60)).max(10) }).parse(req.body);
-    return sendResponse(res, 200, await guardarOperarios(operarios));
-  }),
-);
-
-// Qué planillas completa cada usuario (lo configura técnica).
+// Configuración por usuario de fábrica (técnica): planillas que completa, estado de producción y operarios.
 planillasRouter.get(
   "/accesos",
   requierePermiso(PERMISOS.PLANILLAS_CONFIGURAR),
-  catchAsync(async (_req, res) => sendResponse(res, 200, await listarAccesos())),
+  catchAsync(async (_req, res) => sendResponse(res, 200, await listarConfiguracionUsuarios())),
 );
 
 planillasRouter.put(
   "/accesos/:usuarioId",
   requierePermiso(PERMISOS.PLANILLAS_CONFIGURAR),
   catchAsync(async (req, res) => {
-    const { estaciones } = z.object({ estaciones: z.array(z.string()).max(3) }).parse(req.body);
-    await guardarAccesos(parseIdParam(String(req.params.usuarioId)), estaciones);
-    return sendResponse(res, 200, await listarAccesos());
+    const input = z
+      .object({
+        estaciones: z.array(z.string()).max(3),
+        estado_id: z.string().uuid().nullable(),
+        operarios: z.array(z.string().max(60)).max(MAX_OPERARIOS),
+      })
+      .parse(req.body);
+    await guardarConfiguracionUsuario(parseIdParam(String(req.params.usuarioId)), input);
+    return sendResponse(res, 200, await listarConfiguracionUsuarios());
+  }),
+);
+
+// Catálogo de estados de producción (los define técnica).
+planillasRouter.get(
+  "/estados",
+  requierePermiso(PERMISOS.PLANILLAS_CONFIGURAR),
+  catchAsync(async (_req, res) => sendResponse(res, 200, await listarEstados())),
+);
+
+planillasRouter.put(
+  "/estados",
+  requierePermiso(PERMISOS.PLANILLAS_CONFIGURAR),
+  catchAsync(async (req, res) => {
+    const { estados } = z
+      .object({ estados: z.array(z.object({ id: z.string().uuid().optional(), nombre: z.string().max(60) })).max(30) })
+      .parse(req.body);
+    return sendResponse(res, 200, await guardarEstados(estados));
   }),
 );
 
