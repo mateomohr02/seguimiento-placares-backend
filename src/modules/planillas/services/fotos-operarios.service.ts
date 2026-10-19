@@ -1,6 +1,6 @@
 import { prisma } from "../../../config/prisma";
 import { AppError } from "../../../utils/AppError";
-import { AREA_TERMOLAMINADO } from "../schemas/planilla.schema";
+import { AREA_TERMOLAMINADO, ESTACIONES, type Estacion } from "../schemas/planilla.schema";
 
 export const MAX_FOTO_BYTES = 8 * 1024 * 1024;
 export const MAX_FOTOS_POR_FILA = 12;
@@ -70,4 +70,38 @@ export async function guardarOperarios(nombres: string[]) {
     prisma.areaOperario.createMany({ data: limpios.map((nombre, orden) => ({ area: AREA_TERMOLAMINADO, nombre, orden })) }),
   ]);
   return listarOperarios();
+}
+
+// ───────────────────────── Acceso a las planillas (lo asigna técnica) ─────────────────────────
+
+export async function estacionDeFila(filaId: string) {
+  const f = await prisma.planillaFila.findUnique({ where: { id: filaId }, select: { planilla: { select: { estacion: true } } } });
+  if (!f) throw new AppError("Fila no encontrada.", 404);
+  return f.planilla.estacion;
+}
+
+export async function estacionDeFoto(fotoId: string) {
+  const f = await prisma.planillaFoto.findUnique({ where: { id: fotoId }, select: { fila: { select: { planilla: { select: { estacion: true } } } } } });
+  if (!f) throw new AppError("Foto no encontrada.", 404);
+  return f.fila.planilla.estacion;
+}
+
+export async function listarAccesos() {
+  const usuarios = await prisma.usuario.findMany({
+    where: { activo: true },
+    orderBy: { nombre: "asc" },
+    select: { id: true, nombre: true, rol: { select: { nombre: true } }, planillas: { select: { estacion: true } } },
+  });
+  return usuarios.map((u) => ({ id: u.id, nombre: u.nombre, rol: u.rol.nombre, estaciones: ESTACIONES.filter((e) => u.planillas.some((p) => p.estacion === e)) }));
+}
+
+export async function guardarAccesos(usuarioId: string, estaciones: string[]) {
+  const validas = [...new Set(estaciones)].filter((e): e is Estacion => (ESTACIONES as readonly string[]).includes(e));
+  if (validas.length !== new Set(estaciones).size) throw new AppError("Estación inválida.", 400);
+  const u = await prisma.usuario.findUnique({ where: { id: usuarioId }, select: { activo: true } });
+  if (!u || !u.activo) throw new AppError("Usuario no encontrado.", 404);
+  await prisma.$transaction([
+    prisma.usuarioPlanilla.deleteMany({ where: { usuario_id: usuarioId } }),
+    prisma.usuarioPlanilla.createMany({ data: validas.map((estacion) => ({ usuario_id: usuarioId, estacion })) }),
+  ]);
 }

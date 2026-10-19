@@ -10,6 +10,8 @@ export interface UsuarioAutenticado {
   nombre: string;
   rol: string;
   permisos: string[];
+  /** Planillas de Termolaminado que puede completar (las asigna técnica). */
+  planillas: string[];
 }
 
 declare module "express-serve-static-core" {
@@ -35,11 +37,12 @@ export const autenticar: RequestHandler = catchAsync(async (req, _res, next) => 
       nombre: true,
       activo: true,
       rol: { select: { nombre: true, permisos: { select: { permiso_clave: true } } } },
+      planillas: { select: { estacion: true } },
     },
   });
   if (!u || !u.activo) throw new AppError(SESION_INVALIDA, 401);
 
-  req.usuario = { id: u.id, nombre: u.nombre, rol: u.rol.nombre, permisos: u.rol.permisos.map((p) => p.permiso_clave) };
+  req.usuario = { id: u.id, nombre: u.nombre, rol: u.rol.nombre, permisos: u.rol.permisos.map((p) => p.permiso_clave), planillas: u.planillas.map((p) => p.estacion) };
   next();
 });
 

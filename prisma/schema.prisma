@@ -322,9 +322,22 @@ model Usuario {
   ultimo_acceso  DateTime?
 
   rol Rol @relation(fields: [rol_id], references: [id])
+  planillas UsuarioPlanilla[]
 
   @@index([rol_id])
   @@map("usuario")
+}
+
+// Qué planillas de Termolaminado puede completar cada usuario (las asigna técnica). Un
+// usuario puede tener ninguna, algunas o todas. Aditiva (diseño.md §14).
+model UsuarioPlanilla {
+  usuario_id String           @db.Uuid
+  estacion   PlanillaEstacion
+
+  usuario Usuario @relation(fields: [usuario_id], references: [id], onDelete: Cascade)
+
+  @@id([usuario_id, estacion])
+  @@map("usuario_planilla")
 }
 
 // Escenas 3D de un pedido (archivo .3d de TeoWin) — feature/visor-escenas-3d. Solo

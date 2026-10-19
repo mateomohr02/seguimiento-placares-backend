@@ -356,6 +356,7 @@ Detalle completo en `diseño.md` §14. Lo que hay que tener presente al tocar el
 - **Corregir una `GUARDADA`** guarda antes la versión previa en `planilla_version` (con quién la guardó/reemplazó y cuándo). Una `GUARDADA` no vuelve a `BORRADOR` (`409`). Un `BORRADOR` acepta filas incompletas; al guardar, cada fila necesita pedido, hora de inicio y cantidad (en PVC, mesa chica y/o grande).
 - **PVC**: `cantidad_piezas` = `mesa_chica + mesa_grande`, calculada por el backend; `colores` en mayúsculas y sin puntos; solo las filas de PVC aceptan fotos (hasta 12 por fila, JPG/PNG/WEBP por firma, máx. 8 MB, `bytea`, borrado lógico).
 - **N° de pedido**: texto libre en mayúsculas; si coincide exactamente con un pedido sincronizado se guarda también `pedido_id`.
+- **Acceso por usuario** (`usuario_planilla`): técnica asigna a cada usuario las planillas (Lijado, Encolado, PVC) que completa, desde `/planillas/configuracion`; la sesión (`GET /auth/me`) devuelve `planillas`. `PUT /planillas/dia/...` y las fotos devuelven `403` si la estación no está asignada. Sin asignación, ninguna.
 - **Operarios** (`area_operario`): los configura técnica (`planillas.configurar`); se copian a la planilla al crearla.
 - **Planificación semanal** (`planificacion_semanal`): PDF o imagen por semana (lunes) y tipo (`PEDIDOS` / `RECLAMOS`), subida por técnica con `documentacion.gestionar`; ver con `documentacion.ver`.
 - Esta feature **no lee ni escribe en TeoWin**. Permisos: `planillas.completar`, `planillas.ver`, `planillas.indicadores`, `planillas.configurar` (tabla de la regla 9).
@@ -528,6 +529,7 @@ Todas bajo `/api/planillas`. `estacion` es `lijado`, `encolado` o `pvc`; `fecha`
 | `GET /planillas/indicadores?desde&hasta` | `planillas.indicadores` | Por estación, por día y estado de los pedidos del período |
 | `GET /planillas/trazabilidad?pedido=` | `planillas.ver` | Recorrido de un pedido por las tres estaciones |
 | `GET /planillas/pedidos-sugeridos?q=` · `GET /planillas/colores` | `planillas.ver` | Autocompletado de N° de pedido y de códigos de color |
+| `GET /planillas/accesos` · `PUT /planillas/accesos/:usuarioId` | `planillas.configurar` | Qué planillas completa cada usuario: `{ estaciones: ["LIJADO","ENCOLADO","PVC"] }` |
 | `GET`/`PUT /planillas/operarios` | `planillas.ver` / `planillas.configurar` | Operarios del área: `{ operarios: ["Fabián", "Carlos"] }` (hasta 10) |
 | `POST /planillas/filas/:filaId/fotos` | `planillas.completar` | **Body: la imagen cruda** (`image/jpeg`, `png` o `webp`). Solo filas de PVC. `201`: `{ id, mime, tamano, creado_en }` |
 | `GET`/`DELETE /planillas/fotos/:fotoId` | `planillas.ver` / `planillas.completar` | Imagen / borrado lógico |

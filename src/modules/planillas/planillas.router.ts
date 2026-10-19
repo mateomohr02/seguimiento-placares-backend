@@ -21,6 +21,10 @@ import {
 import {
   agregarFoto,
   eliminarFoto,
+  estacionDeFila,
+  estacionDeFoto,
+  guardarAccesos,
+  listarAccesos,
   getFoto,
   guardarOperarios,
   listarOperarios,
@@ -31,6 +35,11 @@ import {
 // Planillas de producción de Termolaminado (diseño.md §14). Montado en /api/planillas.
 // Ver (tabla, indicadores, trazabilidad): planillas.ver. Completar y corregir: planillas.completar.
 export const planillasRouter = Router();
+
+// Completar una planilla exige el permiso (en la ruta) y tener asignada esa estación.
+function exigirAcceso(asignadas: string[], estacion: string) {
+  if (!asignadas.includes(estacion)) throw new AppError("No tenés acceso a esta planilla.", 403);
+}
 
 const str = (v: unknown) => (typeof v === "string" && v !== "" ? v : undefined);
 
@@ -46,8 +55,10 @@ planillasRouter.put(
   "/dia/:estacion/:fecha",
   requierePermiso(PERMISOS.PLANILLAS_COMPLETAR),
   catchAsync(async (req, res) => {
+    const estacion = parseEstacion(String(req.params.estacion));
+    exigirAcceso(req.usuario!.planillas, estacion);
     const body = parsearPlanillaBody(req.body);
-    const planilla = await guardarPlanilla(parseEstacion(String(req.params.estacion)), String(req.params.fecha), body, req.usuario!.nombre);
+    const planilla = await guardarPlanilla(estacion, String(req.params.fecha), body, req.usuario!.nombre);
     return sendResponse(res, 200, planilla);
   }),
 );
@@ -112,6 +123,23 @@ planillasRouter.put(
   }),
 );
 
+// Qué planillas completa cada usuario (lo configura técnica).
+planillasRouter.get(
+  "/accesos",
+  requierePermiso(PERMISOS.PLANILLAS_CONFIGURAR),
+  catchAsync(async (_req, res) => sendResponse(res, 200, await listarAccesos())),
+);
+
+planillasRouter.put(
+  "/accesos/:usuarioId",
+  requierePermiso(PERMISOS.PLANILLAS_CONFIGURAR),
+  catchAsync(async (req, res) => {
+    const { estaciones } = z.object({ estaciones: z.array(z.string()).max(3) }).parse(req.body);
+    await guardarAccesos(parseIdParam(String(req.params.usuarioId)), estaciones);
+    return sendResponse(res, 200, await listarAccesos());
+  }),
+);
+
 planillasRouter.get(
   "/versiones/:id",
   requierePermiso(PERMISOS.PLANILLAS_VER),
@@ -124,7 +152,9 @@ planillasRouter.post(
   express.raw({ type: [...MIMES_FOTO], limit: MAX_FOTO_BYTES }),
   catchAsync(async (req, res) => {
     if (!Buffer.isBuffer(req.body)) throw new AppError("Se esperaba una imagen (JPG, PNG o WEBP).", 415);
-    return sendResponse(res, 201, await agregarFoto(parseIdParam(String(req.params.filaId)), req.body, req.usuario!.nombre));
+    const filaId = parseIdParam(String(req.params.filaId));
+    exigirAcceso(req.usuario!.planillas, await estacionDeFila(filaId));
+    return sendResponse(res, 201, await agregarFoto(filaId, req.body, req.usuario!.nombre));
   }),
 );
 
@@ -145,7 +175,9 @@ planillasRouter.delete(
   "/fotos/:fotoId",
   requierePermiso(PERMISOS.PLANILLAS_COMPLETAR),
   catchAsync(async (req, res) => {
-    await eliminarFoto(parseIdParam(String(req.params.fotoId)));
+    const fotoId = parseIdParam(String(req.params.fotoId));
+    exigirAcceso(req.usuario!.planillas, await estacionDeFoto(fotoId));
+    await eliminarFoto(fotoId);
     return sendResponse(res, 200, null);
   }),
 );
