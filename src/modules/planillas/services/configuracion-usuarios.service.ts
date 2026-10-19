@@ -18,17 +18,18 @@ export async function operariosDe(usuarioId: string) {
 export async function listarEstados() {
   const e = await prisma.estadoProduccion.findMany({
     orderBy: [{ orden: "asc" }, { creado_en: "asc" }],
-    select: { id: true, nombre: true, _count: { select: { usuarios: true, marcas: true } } },
+    select: { id: true, nombre: true, color: true, _count: { select: { usuarios: true, marcas: true } } },
   });
-  return e.map((x) => ({ id: x.id, nombre: x.nombre, usuarios: x._count.usuarios, marcas: x._count.marcas }));
+  return e.map((x) => ({ id: x.id, nombre: x.nombre, color: x.color, usuarios: x._count.usuarios, marcas: x._count.marcas }));
 }
 
 /**
  * Reemplaza el catálogo con la lista enviada: los que traen `id` se renombran, los nuevos se crean y los que ya no
  * están se borran, salvo que tengan usuarios asignados o marcas en la planificación (se rechaza).
  */
-export async function guardarEstados(estados: { id?: string; nombre: string }[]) {
-  const limpios = estados.map((e) => ({ id: e.id, nombre: e.nombre.trim().replace(/\s+/g, " ") })).filter((e) => e.nombre);
+export async function guardarEstados(estados: { id?: string; nombre: string; color?: string | null }[]) {
+  const limpios = estados.map((e) => ({ id: e.id, nombre: e.nombre.trim().replace(/\s+/g, " "), color: e.color ? e.color.toLowerCase() : null })).filter((e) => e.nombre);
+  for (const e of limpios) if (e.color && !/^#[0-9a-f]{6}$/.test(e.color)) throw new AppError(`El color de "${e.nombre}" no es válido (usá #rrggbb).`, 400);
   const vistos = new Set<string>();
   for (const e of limpios) {
     const k = e.nombre.toLowerCase();
@@ -49,8 +50,8 @@ export async function guardarEstados(estados: { id?: string; nombre: string }[])
     for (const e of limpios.filter((x) => x.id)) await tx.estadoProduccion.update({ where: { id: e.id }, data: { nombre: `~${e.id}` } });
     await tx.estadoProduccion.deleteMany({ where: { id: { in: aBorrar.map((b) => b.id) } } });
     for (const [orden, e] of limpios.entries()) {
-      if (e.id) await tx.estadoProduccion.update({ where: { id: e.id }, data: { nombre: e.nombre, orden } });
-      else await tx.estadoProduccion.create({ data: { nombre: e.nombre, orden } });
+      if (e.id) await tx.estadoProduccion.update({ where: { id: e.id }, data: { nombre: e.nombre, color: e.color, orden } });
+      else await tx.estadoProduccion.create({ data: { nombre: e.nombre, color: e.color, orden } });
     }
   });
   return listarEstados();

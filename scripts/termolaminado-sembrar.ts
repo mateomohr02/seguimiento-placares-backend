@@ -162,8 +162,8 @@ async function main() {
     await prisma.usuarioOperario.createMany({ data: ["Fabián", "Carlos"].map((nombre, orden) => ({ usuario_id: usuario.id, nombre, orden })) });
   }
   const operarios = (await prisma.usuarioOperario.findMany({ where: { usuario_id: usuario.id }, orderBy: { orden: "asc" } })).map((o) => o.nombre);
-  for (const [orden, nombre] of ["Listo Termolaminado", "Listo Mecanizado"].entries()) {
-    await prisma.estadoProduccion.upsert({ where: { nombre }, update: {}, create: { nombre, orden } });
+  for (const [orden, [nombre, color]] of ([["Listo Termolaminado", "#16a34a"], ["Listo Mecanizado", "#2563eb"]] as const).entries()) {
+    await prisma.estadoProduccion.upsert({ where: { nombre }, update: { color }, create: { nombre, color, orden } });
   }
   const listoTermo = await prisma.estadoProduccion.findUniqueOrThrow({ where: { nombre: "Listo Termolaminado" } });
   if (!(await prisma.usuarioEstadoProduccion.findUnique({ where: { usuario_id: usuario.id } }))) {

@@ -154,7 +154,7 @@ planillasRouter.put(
   requierePermiso(PERMISOS.PLANILLAS_CONFIGURAR),
   catchAsync(async (req, res) => {
     const { estados } = z
-      .object({ estados: z.array(z.object({ id: z.string().uuid().optional(), nombre: z.string().max(60) })).max(30) })
+      .object({ estados: z.array(z.object({ id: z.string().uuid().optional(), nombre: z.string().max(60), color: z.string().max(7).nullable().optional() })).max(30) })
       .parse(req.body);
     return sendResponse(res, 200, await guardarEstados(estados));
   }),

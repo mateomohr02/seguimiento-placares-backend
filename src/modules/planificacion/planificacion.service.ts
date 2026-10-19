@@ -32,7 +32,7 @@ const itemSelect = {
   compromiso: true,
   finalizado_en: true,
   observaciones: true,
-  marcas: { select: { estado_id: true, marcado_por: true, marcado_en: true, estado: { select: { nombre: true } } }, orderBy: { marcado_en: "asc" } },
+  marcas: { select: { estado_id: true, marcado_por: true, marcado_en: true, estado: { select: { nombre: true, color: true } } }, orderBy: { marcado_en: "asc" } },
 } satisfies Prisma.PlanificacionItemSelect;
 
 type ItemDB = Prisma.PlanificacionItemGetPayload<{ select: typeof itemSelect }>;
@@ -57,13 +57,13 @@ function itemDTO(i: ItemDB) {
     compromiso: dia(i.compromiso),
     finalizado_en: dia(i.finalizado_en),
     observaciones: i.observaciones,
-    marcas: i.marcas.map((m) => ({ estado_id: m.estado_id, estado: m.estado.nombre, marcado_por: m.marcado_por, marcado_en: m.marcado_en.toISOString() })),
+    marcas: i.marcas.map((m) => ({ estado_id: m.estado_id, estado: m.estado.nombre, color: m.estado.color, marcado_por: m.marcado_por, marcado_en: m.marcado_en.toISOString() })),
   };
 }
 
 /** El estado de producción asignado al usuario (null si técnica no le asignó ninguno). */
 export async function estadoDeUsuario(usuarioId: string) {
-  const e = await prisma.usuarioEstadoProduccion.findUnique({ where: { usuario_id: usuarioId }, select: { estado: { select: { id: true, nombre: true } } } });
+  const e = await prisma.usuarioEstadoProduccion.findUnique({ where: { usuario_id: usuarioId }, select: { estado: { select: { id: true, nombre: true, color: true } } } });
   return e?.estado ?? null;
 }
 
@@ -83,7 +83,7 @@ export async function getSemana(semanaRaw: string | undefined, usuarioId: string
       orderBy: { semana_inicio: "desc" },
       take: 30,
     }),
-    prisma.estadoProduccion.findMany({ orderBy: [{ orden: "asc" }, { creado_en: "asc" }], select: { id: true, nombre: true } }),
+    prisma.estadoProduccion.findMany({ orderBy: [{ orden: "asc" }, { creado_en: "asc" }], select: { id: true, nombre: true, color: true } }),
     estadoDeUsuario(usuarioId),
   ]);
   return {

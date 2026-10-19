@@ -530,7 +530,7 @@ Todas bajo `/api/planillas`. `estacion` es `lijado`, `encolado` o `pvc`; `fecha`
 | `GET /planillas/trazabilidad?pedido=` | `planillas.ver` | Recorrido de un pedido por las tres estaciones |
 | `GET /planillas/pedidos-sugeridos?q=` · `GET /planillas/colores` | `planillas.ver` | Autocompletado de N° de pedido y de códigos de color |
 | `GET /planillas/accesos` · `PUT /planillas/accesos/:usuarioId` | `planillas.configurar` | Configuración por usuario: `{ estaciones: ["LIJADO","ENCOLADO","PVC"], estado_id, operarios: ["Fabián"] }` |
-| `GET`/`PUT /planillas/estados` | `planillas.configurar` | Catálogo de estados de producción: `{ estados: [{ id?, nombre }] }` (`409` si se quita uno asignado o con marcas) |
+| `GET`/`PUT /planillas/estados` | `planillas.configurar` | Catálogo de estados de producción: `{ estados: [{ id?, nombre, color? (#rrggbb) }] }` (`409` si se quita uno asignado o con marcas) |
 | `GET /planillas/operarios` | `planillas.ver` | Los operarios de la estación del usuario: `{ operarios: ["Fabián", "Carlos"] }` |
 | `POST /planillas/filas/:filaId/fotos` | `planillas.completar` | **Body: la imagen cruda** (`image/jpeg`, `png` o `webp`). Solo filas de PVC. `201`: `{ id, mime, tamano, creado_en }` |
 | `GET`/`DELETE /planillas/fotos/:fotoId` | `planillas.ver` / `planillas.completar` | Imagen / borrado lógico |

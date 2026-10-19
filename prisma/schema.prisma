@@ -504,6 +504,7 @@ model UsuarioOperario {
 model EstadoProduccion {
   id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   nombre    String   @unique
+  color     String? // #rrggbb: con el que se ve el estado en la planificación
   orden     Int      @default(0)
   creado_en DateTime @default(now())
 
