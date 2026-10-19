@@ -357,7 +357,7 @@ Detalle completo en `diseño.md` §14. Lo que hay que tener presente al tocar el
 - **PVC**: `cantidad_piezas` = `mesa_chica + mesa_grande`, calculada por el backend; `colores` en mayúsculas y sin puntos; solo las filas de PVC aceptan fotos (hasta 12 por fila, JPG/PNG/WEBP por firma, máx. 8 MB, `bytea`, borrado lógico).
 - **N° de pedido**: texto libre en mayúsculas; si coincide exactamente con un pedido sincronizado se guarda también `pedido_id`.
 - **Acceso por usuario** (`usuario_planilla`): técnica asigna a cada usuario las planillas (Lijado, Encolado, PVC) que completa, desde `/planillas/configuracion`; la sesión (`GET /auth/me`) devuelve `planillas`. `PUT /planillas/dia/...` y las fotos devuelven `403` si la estación no está asignada. Sin asignación, ninguna.
-- **Operarios** (`area_operario`): los configura técnica (`planillas.configurar`); se copian a la planilla al crearla.
+- **Operarios** (`area_operario`): lista del área que configura técnica (`planillas.configurar`); en cada planilla se eligen a mano (`operarios` en el `PUT`, deben estar en la lista o ya estar en la planilla) y se guardan como nombre, así que cambiar la lista no altera las planillas existentes.
 - **Planificación semanal** (`planificacion_semanal`): PDF o imagen por semana (lunes) y tipo (`PEDIDOS` / `RECLAMOS`), subida por técnica con `documentacion.gestionar`; ver con `documentacion.ver`.
 - Esta feature **no lee ni escribe en TeoWin**. Permisos: `planillas.completar`, `planillas.ver`, `planillas.indicadores`, `planillas.configurar` (tabla de la regla 9).
 

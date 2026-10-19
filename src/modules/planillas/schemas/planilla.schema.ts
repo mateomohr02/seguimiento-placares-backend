@@ -57,6 +57,8 @@ export type FilaInput = z.infer<typeof FilaSchema>;
 
 export const PlanillaBodySchema = z.object({
   estado: z.enum(["BORRADOR", "GUARDADA"]),
+  /** Operarios que trabajaron en esta planilla (elegidos a mano de la lista del área). */
+  operarios: z.array(z.string().trim().min(1).max(60)).max(10).default([]),
   filas: z.array(FilaSchema).max(60),
 });
 export type PlanillaBody = z.infer<typeof PlanillaBodySchema>;

@@ -192,9 +192,8 @@ export async function guardarPlanilla(estacion: Estacion, fechaStr: string, body
     }
 
     if (!existente) {
-      const operarios = await tx.areaOperario.findMany({ where: { area: AREA_TERMOLAMINADO }, orderBy: { orden: "asc" }, select: { nombre: true } });
       const creada = await tx.planillaProduccion.create({
-        data: { ...where, estado: "BORRADOR", operarios: operarios.map((o) => o.nombre), creado_por: usuario, modificado_por: usuario },
+        data: { ...where, estado: "BORRADOR", operarios: [], creado_por: usuario, modificado_por: usuario },
       });
       existente = { ...creada, filas: [] };
     } else if (existente.estado === "GUARDADA") {
@@ -216,6 +215,14 @@ export async function guardarPlanilla(estacion: Estacion, fechaStr: string, body
       });
     }
 
+    // Los operarios se eligen a mano para cada planilla y se guardan como nombre: lo que cambie
+    // después en la lista del área no altera las planillas ya creadas.
+    const pool = new Set((await tx.areaOperario.findMany({ where: { area: AREA_TERMOLAMINADO }, select: { nombre: true } })).map((o) => o.nombre));
+    const elegidos = [...new Set(body.operarios)];
+    for (const n of elegidos) {
+      if (!pool.has(n) && !existente.operarios.includes(n)) throw new AppError(`El operario "${n}" no está en la lista del área.`, 400);
+    }
+
     const planillaId = existente.id;
     const idsExistentes = new Set(existente.filas.map((f) => f.id));
     const idsEnviados = body.filas.map((f) => f.id).filter((x): x is string => !!x);
@@ -233,6 +240,7 @@ export async function guardarPlanilla(estacion: Estacion, fechaStr: string, body
       where: { id: planillaId },
       data: {
         estado: body.estado,
+        operarios: elegidos,
         modificado_por: usuario,
         actualizado_en: new Date(),
         ...(body.estado === "GUARDADA" && !existente.guardada_en ? { guardada_en: new Date() } : {}),
