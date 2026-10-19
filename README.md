@@ -89,7 +89,7 @@ app/backend/
 │       ├── escenas-pedido/     # Escenas 3D por pedido (.3d de TeoWin): solo lectura, sin anotaciones. parser/ interpreta el .3d a una geometría liviana (regla 10)
 │       ├── texturas-3d/        # Texturas de los materiales de las escenas 3D, por catálogo (copiadas de la carpeta de TeoWin a la base)
 │       ├── planillas/          # Planillas de producción de Termolaminado (Lijado, Encolado, PVC): borrador/guardada, versiones, fotos, operarios, tabla, indicadores y trazabilidad (regla 11)
-│       ├── planificacion/      # Planificación semanal (pedidos y reclamos) de Termolaminado: PDF o imagen que sube técnica (regla 11)
+│       ├── planificacion/      # Planificación semanal (pedidos y reclamos) de Termolaminado cargada por sistema por técnica, con el marcado de estados de producción por fila (regla 11)
 │       ├── auth/                # Login por PIN, sesión (token firmado), middlewares autenticar / requierePermiso y claves de permiso
 │       └── sync/                # Las queries de solo-lectura contra TeoWin + agrupar-despiece.ts (cuántas piezas físicas es cada fila)
 ├── scripts/
@@ -169,6 +169,7 @@ Otros comandos útiles:
 | `npm run escenas3d:reinterpretar` | Rehace las escenas 3D guardadas con la versión actual del intérprete, desde el `.3d` original de la base (`-- --todas`, `-- --nombre=26-02568`) |
 | `npm run escenas3d:probar -- <carpeta>` | Corre el intérprete sobre una carpeta de `.3d` (copias, nunca la de TeoWin) e informa tiempo, piezas, tamaño del JSON y problemas; no usa la base |
 | `npm run texturas3d:sincronizar` | Copia a la base todas las texturas de las carpetas de colores de TeoWin (catálogos 4, 3, 658 y decoración 641; ~60 MB; idempotente). Ver `diseño.md` §13.5 |
+| `npm run termolaminado:sembrar` | Siembra la base de **prueba** con partes de producción, planificación y estados de ejemplo de Termolaminado (diseño.md §14.7). Se niega a correr si `DATABASE_URL` no apunta a `Neostone_test` |
 | `npm run usuario:sql -- "<nombre>" <rol> <pin>` | Imprime el `INSERT` para dar de alta un usuario (ver [Alta de usuarios](#alta-de-usuarios)) |
 
 ---
