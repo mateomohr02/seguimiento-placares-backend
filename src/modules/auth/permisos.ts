@@ -11,6 +11,7 @@ export const PERMISOS = {
   USUARIOS_GESTIONAR: "usuarios.gestionar",
   PLANILLAS_COMPLETAR: "planillas.completar",
   PLANILLAS_VER: "planillas.ver",
+  PLANILLAS_INDICADORES: "planillas.indicadores",
   PLANILLAS_CONFIGURAR: "planillas.configurar",
 } as const;
 

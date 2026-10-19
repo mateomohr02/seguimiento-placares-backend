@@ -75,7 +75,7 @@ planillasRouter.get(
 
 planillasRouter.get(
   "/indicadores",
-  requierePermiso(PERMISOS.PLANILLAS_VER),
+  requierePermiso(PERMISOS.PLANILLAS_INDICADORES),
   catchAsync(async (req, res) => sendResponse(res, 200, await indicadores(str(req.query.desde), str(req.query.hasta)))),
 );
 

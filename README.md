@@ -358,7 +358,7 @@ Detalle completo en `diseño.md` §14. Lo que hay que tener presente al tocar el
 - **N° de pedido**: texto libre en mayúsculas; si coincide exactamente con un pedido sincronizado se guarda también `pedido_id`.
 - **Operarios** (`area_operario`): los configura técnica (`planillas.configurar`); se copian a la planilla al crearla.
 - **Planificación semanal** (`planificacion_semanal`): PDF o imagen por semana (lunes) y tipo (`PEDIDOS` / `RECLAMOS`), subida por técnica con `documentacion.gestionar`; ver con `documentacion.ver`.
-- Esta feature **no lee ni escribe en TeoWin**. Permisos: `planillas.completar`, `planillas.ver`, `planillas.configurar` (tabla de la regla 9).
+- Esta feature **no lee ni escribe en TeoWin**. Permisos: `planillas.completar`, `planillas.ver`, `planillas.indicadores`, `planillas.configurar` (tabla de la regla 9).
 
 ### 9. Usuarios, roles y permisos
 
@@ -385,6 +385,7 @@ Todo `/api/*` exige sesión salvo `GET /api/health` y `POST /api/auth/login`. Ca
 | `usuarios.gestionar` | Alta y baja de usuarios (previsto; hoy se hace por base) | ✔ | ✔ | — | — |
 | `planillas.completar` | Completar, guardar y corregir las planillas de producción de Termolaminado y sus fotos | ✔ | ✔ | ✔ | — |
 | `planillas.ver` | Ver registros, indicadores y trazabilidad de las planillas | ✔ | ✔ | ✔ | ✔ |
+| `planillas.indicadores` | Ver los indicadores de producción de Termolaminado | ✔ | ✔ | — | ✔ |
 | `planillas.configurar` | Configurar los operarios del área | ✔ | ✔ | — | — |
 
 La planificación semanal de Termolaminado no tiene permiso propio: usa `documentacion.ver` (ver) y `documentacion.gestionar` (subir y eliminar). Ojo: hoy **todo usuario `fabrica`** recibe `planillas.completar` (no hay un rol solo de Termolaminado).
@@ -524,7 +525,7 @@ Todas bajo `/api/planillas`. `estacion` es `lijado`, `encolado` o `pvc`; `fecha`
 | `PUT /planillas/dia/:estacion/:fecha` | `planillas.completar` | Crea o actualiza con `{ estado: "BORRADOR" \| "GUARDADA", filas: [{ id?, hora_inicio, hora_fin, pedido_codigo, cantidad_piezas, observaciones, colocacion_pvc, perfilado, colores, mesa_chica, mesa_grande }] }`. `400` (datos inválidos, mensaje legible), `409` (una guardada no vuelve a borrador) |
 | `GET /planillas/:id` · `GET /planillas/versiones/:id` | `planillas.ver` | Detalle de una planilla / una versión previa (`datos`) |
 | `GET /planillas/registros?desde&hasta&estacion&estado&pedido` | `planillas.ver` | Tabla cruda: una fila por registro con `fotos` (cantidad) y `versiones`. Por defecto, los últimos 30 días |
-| `GET /planillas/indicadores?desde&hasta` | `planillas.ver` | Por estación, por día y estado de los pedidos del período |
+| `GET /planillas/indicadores?desde&hasta` | `planillas.indicadores` | Por estación, por día y estado de los pedidos del período |
 | `GET /planillas/trazabilidad?pedido=` | `planillas.ver` | Recorrido de un pedido por las tres estaciones |
 | `GET /planillas/pedidos-sugeridos?q=` · `GET /planillas/colores` | `planillas.ver` | Autocompletado de N° de pedido y de códigos de color |
 | `GET`/`PUT /planillas/operarios` | `planillas.ver` / `planillas.configurar` | Operarios del área: `{ operarios: ["Fabián", "Carlos"] }` (hasta 10) |
