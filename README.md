@@ -360,6 +360,7 @@ Detalle completo en `diseño.md` §14. Lo que hay que tener presente al tocar el
 - **Configuración por usuario** (la hace técnica, `planillas.configurar`): `usuario_planilla` (planillas que completa; `PUT /planillas/dia/...` y las fotos devuelven `403` si la estación no está asignada), `usuario_estado_produccion` (el estado que marca en la planificación; un estado puede repetirse entre usuarios) y `usuario_operario` (sus operarios). La sesión (`GET /auth/me`) devuelve `planillas`.
 - **Operarios**: los de **su estación** (`usuario_operario`); en cada planilla se eligen a mano (`operarios` en el `PUT`, deben ser los del usuario o estar ya en la planilla) y se guardan como nombre, así que cambiar la lista no altera las planillas existentes.
 - **Planificación semanal por sistema** (`planificacion_item`, `planificacion_marca`, `estado_produccion`): técnica (`documentacion.gestionar`) carga a mano las filas de pedidos y reclamos de cada semana (lunes); quien tiene un estado de producción asignado marca/desmarca ese estado en cada fila (`PUT /planificacion/items/:id/marca`). Ver con `documentacion.ver`. Ya no hay carga de PDF/imagen.
+- **Visibilidad de registros**: el rol `fabrica` solo ve los registros de las planillas que tiene asignadas (`GET /planillas/registros`, `/dia/...`, `/:id`, `/versiones/:id`, `/fotos/:id`, `/trazabilidad`, sugerencias y colores); técnica, gerencia y admin ven todas. Una estación no visible responde `403`; sin planillas asignadas, el listado queda vacío y la trazabilidad responde `403` (`estacionesVisibles` en `planillas.router.ts`).
 - Esta feature **no lee ni escribe en TeoWin**. Permisos: `planillas.completar`, `planillas.ver`, `planillas.indicadores`, `planillas.configurar` (tabla de la regla 9).
 
 ### 9. Usuarios, roles y permisos
@@ -526,7 +527,7 @@ Todas bajo `/api/planillas`. `estacion` es `lijado`, `encolado` o `pvc`; `fecha`
 | `GET /planillas/dia/:estacion/:fecha` | `planillas.ver` | La planilla de ese día con sus filas, fotos (metadatos) y versiones; `data: null` si no existe |
 | `PUT /planillas/dia/:estacion/:fecha` | `planillas.completar` | Crea o actualiza con `{ estado: "BORRADOR" \| "GUARDADA", filas: [{ id?, hora_inicio, hora_fin, pedido_codigo, cantidad_piezas, observaciones, colocacion_pvc, perfilado, colores, mesa_chica, mesa_grande }] }`. `400` (datos inválidos, mensaje legible), `409` (una guardada no vuelve a borrador) |
 | `GET /planillas/:id` · `GET /planillas/versiones/:id` | `planillas.ver` | Detalle de una planilla / una versión previa (`datos`) |
-| `GET /planillas/registros?desde&hasta&estacion&estado&pedido` | `planillas.ver` | Tabla cruda: una fila por registro con `fotos` (cantidad) y `versiones`. Por defecto, los últimos 30 días |
+| `GET /planillas/registros?desde&hasta&estacion&estado&pedido` | `planillas.ver` (+ planilla asignada si es `fabrica`) | Tabla cruda: una fila por registro con `fotos` (cantidad) y `versiones`. Por defecto, los últimos 30 días |
 | `GET /planillas/indicadores?desde&hasta` | `planillas.indicadores` | Por estación, por día y estado de los pedidos del período |
 | `GET /planillas/trazabilidad?pedido=` | `planillas.ver` | Recorrido de un pedido por las tres estaciones |
 | `GET /planillas/pedidos-sugeridos?q=` · `GET /planillas/colores` | `planillas.ver` | Autocompletado de N° de pedido y de códigos de color |

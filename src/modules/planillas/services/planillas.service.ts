@@ -93,11 +93,12 @@ export async function getPlanilla(id: string) {
 }
 
 export async function getVersion(id: string) {
-  const v = await prisma.planillaVersion.findUnique({ where: { id } });
+  const v = await prisma.planillaVersion.findUnique({ where: { id }, include: { planilla: { select: { estacion: true } } } });
   if (!v) throw new AppError("Versión no encontrada.", 404);
   return {
     id: v.id,
     planilla_id: v.planilla_id,
+    estacion: v.planilla.estacion,
     version: v.version,
     guardada_por: v.guardada_por,
     guardada_en: v.guardada_en.toISOString(),
@@ -269,6 +270,8 @@ export interface FiltrosRegistros {
   desde?: string;
   hasta?: string;
   estacion?: Estacion;
+  /** Estaciones que el usuario puede ver (las de su acceso si es de fábrica). */
+  estaciones: readonly Estacion[];
   estado?: "BORRADOR" | "GUARDADA";
   pedido?: string;
 }
@@ -280,7 +283,7 @@ export async function listarRegistros(f: FiltrosRegistros) {
       planilla: {
         area: AREA_TERMOLAMINADO,
         fecha: { gte: desde, lte: hasta },
-        ...(f.estacion ? { estacion: f.estacion } : {}),
+        estacion: f.estacion ? f.estacion : { in: [...f.estaciones] },
         ...(f.estado ? { estado: f.estado } : {}),
       },
       ...(f.pedido ? { pedido_codigo: { contains: f.pedido.trim().toUpperCase() } } : {}),
@@ -332,10 +335,10 @@ interface FilaTraza {
   planilla_id: string;
 }
 
-async function filasPorCodigos(codigos: string[]): Promise<FilaTraza[]> {
+async function filasPorCodigos(codigos: string[], estaciones: readonly Estacion[] = ESTACIONES): Promise<FilaTraza[]> {
   if (codigos.length === 0) return [];
   const filas = await prisma.planillaFila.findMany({
-    where: { pedido_codigo: { in: codigos }, planilla: { area: AREA_TERMOLAMINADO } },
+    where: { pedido_codigo: { in: codigos }, planilla: { area: AREA_TERMOLAMINADO, estacion: { in: [...estaciones] } } },
     select: {
       pedido_codigo: true,
       hora_inicio: true,
@@ -361,9 +364,9 @@ async function filasPorCodigos(codigos: string[]): Promise<FilaTraza[]> {
   }));
 }
 
-function resumenPedido(codigo: string, filas: FilaTraza[]) {
+function resumenPedido(codigo: string, filas: FilaTraza[], estaciones: readonly Estacion[] = ESTACIONES) {
   const porEstacion = Object.fromEntries(
-    ESTACIONES.map((e) => {
+    estaciones.map((e) => {
       const fs = filas.filter((f) => f.estacion === e);
       return [
         e,
@@ -376,28 +379,28 @@ function resumenPedido(codigo: string, filas: FilaTraza[]) {
         },
       ];
     }),
-  ) as Record<Estacion, { registros: number; piezas: number; minutos: number; primera: string | null; ultima: string | null }>;
-  const pasadas = ESTACIONES.filter((e) => porEstacion[e].registros > 0);
-  const piezas = pasadas.map((e) => porEstacion[e].piezas);
+  ) as Partial<Record<Estacion, { registros: number; piezas: number; minutos: number; primera: string | null; ultima: string | null }>>;
+  const pasadas = estaciones.filter((e) => porEstacion[e]!.registros > 0);
+  const piezas = pasadas.map((e) => porEstacion[e]!.piezas);
   return {
     pedido: codigo,
     estaciones: porEstacion,
-    completo: pasadas.length === ESTACIONES.length,
+    completo: pasadas.length === estaciones.length,
     // La estación siguiente a la última por la que pasó, si falta.
-    siguiente: pasadas.length === ESTACIONES.length ? null : (ESTACIONES.find((e) => porEstacion[e].registros === 0) ?? null),
+    siguiente: pasadas.length === estaciones.length ? null : (estaciones.find((e) => porEstacion[e]!.registros === 0) ?? null),
     diferencia: pasadas.length > 1 && new Set(piezas).size > 1,
   };
 }
 
-export async function trazabilidadDePedido(codigo: string) {
+export async function trazabilidadDePedido(codigo: string, estaciones: readonly Estacion[] = ESTACIONES) {
   const c = codigo.trim().toUpperCase();
   if (!c) throw new AppError("Indicá el N° de pedido.", 400);
-  const filas = await filasPorCodigos([c]);
+  const filas = await filasPorCodigos([c], estaciones);
   const pedido = await prisma.pedido.findFirst({
     where: { codigo_pedido: { equals: c, mode: "insensitive" }, estado: { not: "ELIMINADO" } },
     select: { id: true, referencia: true },
   });
-  return { ...resumenPedido(c, filas), pedido_id: pedido?.id ?? null, referencia: pedido?.referencia ?? null, registros: filas };
+  return { ...resumenPedido(c, filas, estaciones), pedido_id: pedido?.id ?? null, referencia: pedido?.referencia ?? null, registros: filas };
 }
 
 export async function indicadores(desdeRaw?: string, hastaRaw?: string) {
@@ -459,7 +462,7 @@ export async function indicadores(desdeRaw?: string, hastaRaw?: string) {
   };
 }
 
-export async function sugerirPedidos(q: string) {
+export async function sugerirPedidos(q: string, estaciones: readonly Estacion[] = ESTACIONES) {
   const t = q.trim().toUpperCase();
   if (t.length < 2) return [];
   const [sync, usados] = await Promise.all([
@@ -469,7 +472,7 @@ export async function sugerirPedidos(q: string) {
       distinct: ["codigo_pedido"],
       take: 8,
     }),
-    prisma.planillaFila.findMany({ where: { pedido_codigo: { contains: t } }, select: { pedido_codigo: true }, distinct: ["pedido_codigo"], take: 8 }),
+    prisma.planillaFila.findMany({ where: { pedido_codigo: { contains: t }, planilla: { estacion: { in: [...estaciones] } } }, select: { pedido_codigo: true }, distinct: ["pedido_codigo"], take: 8 }),
   ]);
   const out = new Map<string, { codigo: string; referencia: string | null }>();
   for (const p of sync) out.set(p.codigo_pedido.toUpperCase(), { codigo: p.codigo_pedido.toUpperCase(), referencia: p.referencia });
@@ -478,10 +481,10 @@ export async function sugerirPedidos(q: string) {
 }
 
 // Códigos de color ya usados, del más al menos frecuente (autocompletado).
-export async function coloresUsados() {
+export async function coloresUsados(estaciones: readonly Estacion[] = ESTACIONES) {
   const g = await prisma.planillaFila.groupBy({
     by: ["colores"],
-    where: { colores: { not: null } },
+    where: { colores: { not: null }, planilla: { estacion: { in: [...estaciones] } } },
     _count: { _all: true },
     orderBy: { _count: { colores: "desc" } },
     take: 200,
