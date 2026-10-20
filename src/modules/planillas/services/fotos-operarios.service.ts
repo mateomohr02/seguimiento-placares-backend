@@ -22,9 +22,9 @@ export async function agregarFoto(filaId: string, contenido: Buffer, usuario: st
 
   const fila = await prisma.planillaFila.findUnique({
     where: { id: filaId },
-    select: { planilla_id: true, planilla: { select: { estacion: true } }, _count: { select: { fotos: { where: { eliminado_en: null } } } } },
+    select: { planilla_id: true, eliminado_en: true, planilla: { select: { estacion: true } }, _count: { select: { fotos: { where: { eliminado_en: null } } } } },
   });
-  if (!fila) throw new AppError("Fila no encontrada.", 404);
+  if (!fila || fila.eliminado_en) throw new AppError("Fila no encontrada.", 404);
   if (fila.planilla.estacion !== "PVC") throw new AppError("Solo las filas de PVC llevan fotos.", 400);
   if (fila._count.fotos >= MAX_FOTOS_POR_FILA) throw new AppError(`Una fila admite hasta ${MAX_FOTOS_POR_FILA} fotos.`, 400);
 
