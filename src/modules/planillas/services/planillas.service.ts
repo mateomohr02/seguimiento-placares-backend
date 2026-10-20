@@ -228,7 +228,8 @@ export async function guardarPlanilla(estacion: Estacion, fechaStr: string, body
     // estación (null = todos, para que un operario nuevo aparezca marcado); corregir una ya guardada no lo cambia.
     if (existente.estado !== "GUARDADA") {
       const elegidosDelPool = elegidos.filter((n) => pool.has(n));
-      const todos = pool.size > 0 && [...pool].every((n) => elegidosDelPool.includes(n));
+      // Sin ninguno elegido (o sin operarios configurados todavía) no se recuerda nada: queda «todos» para no dejar la estación sin preselección.
+      const todos = pool.size === 0 || elegidosDelPool.length === 0 || [...pool].every((n) => elegidosDelPool.includes(n));
       await tx.usuarioPlanilla.updateMany({
         where: { usuario_id: usuarioId, estacion },
         data: { operarios_predeterminados: todos ? Prisma.DbNull : elegidosDelPool },
