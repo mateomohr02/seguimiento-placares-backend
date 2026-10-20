@@ -335,6 +335,8 @@ model Usuario {
 model UsuarioPlanilla {
   usuario_id String           @db.Uuid
   estacion   PlanillaEstacion
+  /// Operarios que se preseleccionan al abrir una planilla nueva de esta estación (lista de nombres). null = todos los del usuario.
+  operarios_predeterminados Json?
 
   usuario Usuario @relation(fields: [usuario_id], references: [id], onDelete: Cascade)
 

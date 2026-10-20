@@ -13,6 +13,21 @@ export async function operariosDe(usuarioId: string) {
   return o.map((x) => x.nombre);
 }
 
+/**
+ * Operarios que se preseleccionan al abrir una planilla nueva, por estación asignada: los que el usuario dejó elegidos la
+ * última vez en esa estación (se guardan al completar la planilla) o, si nunca los cambió, todos sus operarios. Solo se
+ * devuelven los que siguen en la lista del usuario.
+ */
+export async function predeterminadosDe(usuarioId: string) {
+  const [pool, asignadas] = await Promise.all([operariosDe(usuarioId), prisma.usuarioPlanilla.findMany({ where: { usuario_id: usuarioId }, select: { estacion: true, operarios_predeterminados: true } })]);
+  const out: Partial<Record<Estacion, string[]>> = {};
+  for (const a of asignadas) {
+    const pref = Array.isArray(a.operarios_predeterminados) ? (a.operarios_predeterminados as unknown[]).filter((x): x is string => typeof x === "string") : null;
+    out[a.estacion] = pref ? pool.filter((n) => pref.includes(n)) : pool;
+  }
+  return out;
+}
+
 // ───────────────────────── Catálogo de estados de producción ─────────────────────────
 
 export async function listarEstados() {
@@ -110,8 +125,9 @@ export async function guardarConfiguracionUsuario(usuarioId: string, input: Conf
   }
 
   await prisma.$transaction([
-    prisma.usuarioPlanilla.deleteMany({ where: { usuario_id: usuarioId } }),
-    prisma.usuarioPlanilla.createMany({ data: estaciones.map((estacion) => ({ usuario_id: usuarioId, estacion })) }),
+    // Solo se quitan las estaciones que dejó de tener y se agregan las nuevas: las que siguen conservan sus operarios predeterminados.
+    prisma.usuarioPlanilla.deleteMany({ where: { usuario_id: usuarioId, estacion: { notIn: estaciones } } }),
+    prisma.usuarioPlanilla.createMany({ data: estaciones.map((estacion) => ({ usuario_id: usuarioId, estacion })), skipDuplicates: true }),
     prisma.usuarioEstadoProduccion.deleteMany({ where: { usuario_id: usuarioId } }),
     ...(input.estado_id ? [prisma.usuarioEstadoProduccion.create({ data: { usuario_id: usuarioId, estado_id: input.estado_id } })] : []),
     prisma.usuarioOperario.deleteMany({ where: { usuario_id: usuarioId } }),
