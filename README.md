@@ -175,6 +175,10 @@ Otros comandos útiles:
 
 ---
 
+## Placares y Cocinas (rama `feature/extension-cocinas`)
+
+El sync de TeoWin trae las piezas de corte de **placares (catálogo 4)** y **cocinas (catálogo 3)**: `siEscandallo = 1`, `idCatalogo IN (3, 4)` y familia del listado `A02` de su mismo catálogo. Una orden puede ser mixta y se sincroniza una sola vez. `modulo.linea` (`LineaProducto`: `PLACARES`/`COCINAS`) se asigna con el catálogo de la fila raíz del módulo (`src/modules/sync/linea-producto.ts`); pedido y orden devuelven `lineas` derivado. `GET /ordenes?linea=PLACARES|COCINAS` filtra (una orden mixta sale en ambos). No se soportan los catálogos viejos 100242/100265. Cocinas no tiene escandallo: sus documentos son Nota de Pedido, Detalle de Remisión, `HERRAJES_COCINAS` y `ACCESORIOS_COCINAS` (el backend no valida el tipo contra la línea, solo la UI). Migración `20261022120000_linea_producto_modulo` (con `down.sql`): aplicada solo en `Neostone_test`. El intérprete 3D pasó a la versión 30: al desplegar, `npm run escenas3d:reinterpretar` y `npm run texturas3d:sincronizar`. Detalle en `diseño.md` §16.
+
 ## Flujo de ramas (git)
 
 Detalle en `diseño.md` §15 (vale para este repo y el otro).
