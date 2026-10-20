@@ -8,6 +8,7 @@ export function toModuloResponseDTO(
     id: modulo.id,
     idEscena: modulo.idEscena,
     descripcion: modulo.descripcion,
+    linea: modulo.linea,
     estado: modulo.estado,
     despieceTiposCount: modulo.despieceTipos.length,
   };

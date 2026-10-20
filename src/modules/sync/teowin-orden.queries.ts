@@ -1,10 +1,15 @@
 import { teowinQuery } from "../../config/teowin";
+import { CATALOGOS_SINCRONIZADOS } from "./linea-producto";
 import type {
   TeowinDespieceRow,
   TeowinModuloInfo,
   TeowinOrdenCabecera,
   TeowinPedidoInfo,
 } from "./teowin-orden.types";
+
+// Catálogos de TeoWin que se sincronizan (3 = Cocinas, 4 = Placares). Son constantes numéricas
+// del código, no entrada de usuario: se interpolan en el SQL.
+const CATALOGOS_SQL = CATALOGOS_SINCRONIZADOS.join(", ");
 
 // Qué filas del despiece son piezas de CORTE (y no tarugos, herrajes, guías,
 // tiradores, etc.). BUG REAL (orden 263500002, pedido 26-02149, módulo 38:
@@ -14,13 +19,16 @@ import type {
 // lista fija PZA/PZC/PZD/PZP que documentaba diseño.md §3.2 es la del
 // catálogo 3 (Cocinas): en el catálogo 4 la familia de paneles se llama
 // PZPP, no PZP. La fuente de verdad es el propio listado de corte de
-// TeoWin: tFamiliasListadosFabricacion, listado A02, catálogo 4 (hoy PZPP,
-// PZD, PZC, PZA). Se lee de ahí, en vez de fijarla en el código, para que
-// una familia nueva en ese listado entre sola.
+// TeoWin: tFamiliasListadosFabricacion, listado A02, POR CATÁLOGO (catálogo 4:
+// PZPP, PZD, PZC, PZA; catálogo 3 = Cocinas: PZA, PZC, PZD, PZP). Se lee de
+// ahí, en vez de fijarla en el código, para que una familia nueva en ese
+// listado entre sola. El EXISTS compara contra el catálogo de la propia fila
+// (fl.idCatalogo = d.idCatalogo), así una familia de corte de cocinas no deja
+// pasar piezas de placares ni al revés.
 const FAMILIAS_DE_CORTE = `EXISTS (
          SELECT 1 FROM tFamiliasListadosFabricacion fl
          WHERE fl.codigoListado = 'A02'
-           AND fl.idCatalogo = 4
+           AND fl.idCatalogo = d.idCatalogo
            AND fl.empresa = d.empresa
            AND fl.familia = d.familia)`;
 
@@ -59,10 +67,11 @@ export async function fetchOrdenCabecera(orden: number): Promise<TeowinOrdenCabe
 // para un mismo familia/articulo/idCatalogo pueden existir ambas filas, el
 // join se hace con OUTER APPLY TOP 1 (prefiere 'ESP') para no duplicar filas
 // (mismo fan-out del bug descrito arriba). Igual en fetchModulosDePedido.
-// Filtro de "es una pieza de placar": d.idCatalogo = 4 (separa las líneas de
-// producto) MÁS pertenecer a las familias de corte del catálogo 4 (ver
-// FAMILIAS_DE_CORTE arriba) — no la lista fija PZA/PZC/PZD/PZP de diseño.md
-// §3.2 original, que es la del catálogo 3.
+// Filtro de "es una pieza de corte": d.idCatalogo IN (3, 4) (cocinas y placares;
+// separa las líneas de producto) MÁS pertenecer a las familias de corte de SU
+// catálogo (ver FAMILIAS_DE_CORTE arriba). Una orden mixta trae las piezas de
+// ambos catálogos en una sola pasada; la línea de cada módulo se resuelve con
+// linea-producto.ts.
 // Confirmado con el Maestro de Productos de TeoWin que las mismas familias
 // (ej. PZA) existen con artículos distintos en el catálogo 3 (Cocinas) y en
 // el catálogo 4 (Placares) — filtrar solo por familia podía traer piezas de
@@ -96,7 +105,7 @@ export async function fetchOrdenDespiece(orden: number): Promise<TeowinDespieceR
      ) ad
      WHERE ofab.codigoOrdenFabricacion = @orden
        AND d.siEscandallo = 1
-       AND d.idCatalogo = 4
+       AND d.idCatalogo IN (${CATALOGOS_SQL})
        AND ${FAMILIAS_DE_CORTE}`,
     { orden },
   );
@@ -130,7 +139,8 @@ export async function fetchModulosDePedido(codigoPedido: string): Promise<Teowin
         ad.descripcion AS descripcion_mueble,
         padre.medida1  AS L,
         padre.medida2  AS H,
-        padre.medida3  AS P
+        padre.medida3  AS P,
+        padre.idCatalogo AS idCatalogo
      FROM tdespieceLineaPresupuesto padre
      OUTER APPLY (
          SELECT TOP 1 x.descripcion

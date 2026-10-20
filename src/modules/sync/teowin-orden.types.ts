@@ -34,4 +34,6 @@ export interface TeowinModuloInfo {
   L: number | null;
   H: number | null;
   P: number | null;
+  /** Catálogo de la fila raíz del módulo (3 = Cocinas, 4 = Placares): define Modulo.linea. */
+  idCatalogo: number | null;
 }

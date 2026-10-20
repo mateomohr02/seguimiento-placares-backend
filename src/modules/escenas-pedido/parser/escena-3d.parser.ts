@@ -11,7 +11,9 @@ import { evaluar, grupos, oculto, type Entorno } from "./expresion";
 // base, así se puede re-interpretar).
 type Vec3 = [number, number, number];
 
-export const PARSER_VERSION = 29;
+// v30: cocinas (catálogo 3): encimera reconstruida cuando el .3d la trae vacía, catálogo de cada pieza
+// siempre explícito si difiere del de su mueble, animaciones sin piezas descartadas (diseño.md §13.7).
+export const PARSER_VERSION = 30;
 
 export interface CajaEscena {
   /** idEscena del módulo al que pertenece (null = no asociada). */
@@ -30,7 +32,7 @@ export interface CajaEscena {
   a?: number;
   /** Opacidad (transp) cuando la pieza es translúcida (vidrio); se omite si es opaca. */
   o?: number;
-  /** Catálogo de la pieza cuando no es el 4 (ej. 658 = puertas, 3 = cocinas): define dónde buscar su textura. */
+  /** Catálogo de la pieza cuando difiere del de su mueble (ej. 658 = puertas, 636 = encimeras): define dónde buscar su textura; si falta es el del mueble. */
   k?: string;
   /** Foto de paisaje (`eti"PSJ"`): la imagen entera cubre la cara y se ve sin sombras. */
   p?: 1;
@@ -169,6 +171,8 @@ class Nodo {
   nombreModulo = "";
   /** Marca `nuncavis3d`: la pieza no se dibuja nunca en 3D (se salta con todo lo que cuelga). */
   nuncaVisible = false;
+  /** Marca `almacenCMB`: contenedor oculto de los trozos de encimera de un mueble (TeoWin los une en el objeto `EN`). */
+  almacen = false;
   /** Espesor del tablero (matTablero con la cara 128), si es numérico. */
   espesor: number | null = null;
   /** Condición de `invisibilidad(...)`, se evalúa con las medidas del mueble. */
@@ -520,6 +524,7 @@ function parsearArbol(texto: string): Nodo {
     const o = pila[pila.length - 1];
     // `nuncavis3d` e `invisib` (ej. los tiradores de un armario sin tirador): TeoWin no dibuja la pieza.
     if (/\b(nuncavis3d|invisib)\b/.test(t) && !t.startsWith("eti")) o.nuncaVisible = true;
+    if (/\balmacenCMB\b/.test(t) && !t.startsWith("eti")) o.almacen = true;
     if (!t.startsWith("eti")) {
       if (/\bseabre\b/.test(t)) o.seAbre = true;
       if (/\bcorredera\b/.test(t)) o.corredera = true;
@@ -764,6 +769,9 @@ function buscarPorcen(n: Nodo): number | null {
 // valor vive en los scripts del catálogo, no en el .3d.
 const ESPESOR_DEFECTO = 18;
 
+// Solo para escenas que no traen catálogo (pieza sin `k` y sin mueble): el parser siempre lo declara, esto es un respaldo.
+const CAT_DEFECTO = "4";
+
 /** Opciones del intérprete: `biblioteca` devuelve el texto del `.3d` de un objeto de la biblioteca de TeoWin. */
 export interface OpcionesInterprete {
   biblioteca?: (catalogo: string, familia: string, nombre: string) => string | null;
@@ -775,6 +783,13 @@ export function interpretarEscena3D(texto: string, opciones: OpcionesInterprete 
     version3d: /^\/\/version (.+)$/m.exec(texto)?.[1]?.trim() ?? null,
   };
   const raiz = parsearArbol(texto);
+  // Material de encimera por defecto de la escena: `hdrDataLin <636 EN;MIT/BLANCO_NORTE/BNO>` (catálogo 636, código BNO).
+  // Las piezas de encimera que traen el marcador `enci` se dibujan con él.
+  const hdrEncimera = (() => {
+    const lin = /^\s*hdrDataLin (.*)$/m.exec(texto)?.[1] ?? "";
+    const m = /<636 EN;[^/>]*\/[^/>]*\/([^>]+)>/.exec(lin);
+    return m ? `<636>${m[1].trim()}` : null;
+  })();
   const globales = raiz.globales;
   const escena = raiz.kids[0];
   const out: Escena3D = {
@@ -805,6 +820,10 @@ export function interpretarEscena3D(texto: string, opciones: OpcionesInterprete 
   };
 
   const inicioParedes: [number, number][] = [];
+
+  // Catálogo de cada mueble (4 = Placares, 3 = Cocinas…). Una pieza lleva `k` (su catálogo) siempre que difiera del de su
+  // mueble: así nunca se supone el de Placares para una pieza de Cocinas (los códigos de color se repiten entre catálogos).
+  const catDeModulo = new Map<number, string>();
 
   // Variables que en el .3d valen "el espesor del material de esta pieza" (mymat, y los GRxx = "matxx"):
   // su valor real está en el matTablero de cada pieza, no en un parámetro.
@@ -845,10 +864,16 @@ export function interpretarEscena3D(texto: string, opciones: OpcionesInterprete 
       ...(c.uv ? { uv: c.uv } : {}),
       ...(anim !== null ? { a: anim } : {}),
       ...(datos.opacidad !== null ? { o: datos.opacidad } : {}),
-      ...(cat !== "4" ? { k: cat } : {}),
+      ...(cat !== catDeModulo.get(id ?? -1) ? { k: cat } : {}),
       ...(/paisaje|skyline/i.test(nombre) || /^(skyline|paisaje)/i.test(datos.m) ? { e: 1 as const } : {}),
     });
   };
+
+  // Cocinas: ¿viene vacío el objeto de primer nivel EN (encimera)? Entonces se arma con los trozos que guarda cada mueble.
+  let reconEncimera = false;
+  /** El mueble que se está recorriendo ya trae su encimera a la vista (no se repite la del almacén). */
+  let moduloConEncimera = false;
+  const reconDibujadas = new Set<string>();
 
   const caminar = (
     n: Nodo,
@@ -861,10 +886,17 @@ export function interpretarEscena3D(texto: string, opciones: OpcionesInterprete 
     catPadre: string,
     enCorr = false,
     marcoPadre: { M: Mat3; T: Vec3; L: number } | null = null,
+    recon: "EN" | null = null,
   ) => {
     // Las patas (objeti PAT) quedan bajo el zócalo y TeoWin no las muestra desde afuera: no se dibujan.
     // Las fuentes de luz (objeti LZ: el cono amarillo de una lámpara) no se dibujan: TeoWin solo muestra la lámpara.
-    if (NODOS_IGNORADOS.has(n.nombre) || n.nuncaVisible || n.objeti === "PAT" || n.objeti === "LZ") return;
+    if (NODOS_IGNORADOS.has(n.nombre) || n.objeti === "PAT" || n.objeti === "LZ") return;
+    // Cocinas: cuando el objeto de primer nivel EN (encimera) viene vacío en el .3d (`nTrozosSaved` sin hijos), TeoWin la arma
+    // al abrir la escena con los trozos que cada mueble guarda ocultos (`encim.` dentro de un `almacenCMB`, nuncavis3d): se
+    // dibujan esos trozos (y solo ellos) para que las bases no queden sin tapa. Con el zócalo no se hace lo mismo: solo
+    // algunos muebles traen su pieza y quedaría a medias (los ZC vacíos se dejan como están).
+    if (recon === null && n.nuncaVisible && n.almacen && reconEncimera && !moduloConEncimera) recon = "EN";
+    if (n.nuncaVisible && recon === null) return;
     // Objeto de la biblioteca de TeoWin (atrezzo) sin geometría en la escena: se toma del archivo del catálogo.
     if (n.biblioteca && !n.bibliotecaCargada && opciones.biblioteca && !tieneGeometria(n)) {
       n.bibliotecaCargada = true;
@@ -948,8 +980,8 @@ export function interpretarEscena3D(texto: string, opciones: OpcionesInterprete 
     // Los catálogos de decoración y equipamiento (encimeras, electrodomésticos, puertas y ventanas, lámparas…)
     // no se animan: ni se mueven solos ni acompañan a un mueble que se abre.
     const sinAnim = SIN_ANIMACION.has(cat);
-    let anim = sinAnim ? null : animPadre;
-    if (enModulo && !sinAnim) {
+    let anim = sinAnim || recon !== null ? null : animPadre;
+    if (enModulo && !sinAnim && recon === null) {
       if (n.seAbre && enCorr && envPadre.L !== undefined && env.L !== undefined && envPadre.L - env.L >= 1) {
         // Hoja de una puerta de paso corrediza: corre en el plano de la puerta (X), no hacia el frente.
         const sentido = pos[0] + env.L / 2 < envPadre.L / 2 ? 1 : -1;
@@ -1002,6 +1034,8 @@ export function interpretarEscena3D(texto: string, opciones: OpcionesInterprete 
     }
 
     for (const pr of n.prims) {
+      // En una reconstrucción solo cuentan las piezas del propio encim.
+      if (recon !== null && (n.objeti !== recon || (pr.tipo !== "extrude" && pr.tipo !== "extrudeSp") || pr.sinEti)) continue;
       if (pr.invisible) continue;
       if (pr.tipo === "faceset" || pr.tipo === "face") {
         const esCara = n.objeti === "TQC" || n.objeti === "CLC";
@@ -1141,33 +1175,44 @@ export function interpretarEscena3D(texto: string, opciones: OpcionesInterprete 
           const a = pr.ang.slice(0, 3).map((x) => ev(x, env) ?? 0);
           Mc = mul(M2, rotacion(a[0] ?? 0, a[1] ?? 0, a[2] ?? 0));
         }
+        if (recon !== null) {
+          // Un almacén guarda varios trozos del mismo módulo en el mismo lugar (los de cada variante de corte): se dibuja uno.
+          const dup = `${id}|${pr.m}|${rv([T2[0] + o[0], T2[1] + o[1], T2[2] + o[2]]).join()}|${dim.join()}|${Mc.join()}`;
+          if (reconDibujadas.has(dup)) continue;
+          reconDibujadas.add(dup);
+        }
         out.cajas.push({
           mod: id,
-          m: pr.m,
+          m: n.objeti === "EN" && pr.m === "enci" && hdrEncimera ? hdrEncimera : pr.m,
           c: pr.c,
           t: rv([T2[0] + o[0], T2[1] + o[1], T2[2] + o[2]]),
           r: Mc.map((x) => Math.round(x * 1e4) / 1e4),
           s: [r1(dim[0]), r1(dim[1]), r1(dim[2])],
           ...(anim !== null ? { a: anim } : {}),
           ...(pr.opacidad !== null ? { o: pr.opacidad } : {}),
-          ...(cat !== "4" ? { k: cat } : {}),
+          ...(cat !== catDeModulo.get(id ?? -1) ? { k: cat } : {}),
           ...(pr.etiqueta === "PSJ" ? { p: 1 as const } : {}),
         });
       }
     }
-    if (enModulo && n.camino.length >= 3 && !tieneGeometria(n) && (n.objeti === "SWL" || n.objeti === "EN" || n.objeti === "CPT")) {
+    if (enModulo && recon === null && n.camino.length >= 3 && !tieneGeometria(n) && (n.objeti === "SWL" || n.objeti === "EN" || n.objeti === "CPT")) {
       // Encimera sin sólido en el .3d: TeoWin la genera desde el recorrido (cara inferior a 870 mm, 30 mm de espesor).
       const losa = prismaDeContorno(n.camino, 30);
       if (losa) emitirMalla({ v: losa.v, i: losa.i, uv: null }, { m: "", c: [0.93, 0.93, 0.93], opacidad: null }, M2, T2, id, anim, cat, n.nombre);
     }
-    if (enModulo) {
+    if (enModulo && recon === null) {
       for (const mc of n.meshes) {
         if (mc.invisible) continue;
         emitirMalla({ v: mc.v, i: mc.i, uv: mc.uv }, { m: mc.m, c: mc.c, opacidad: mc.opacidad }, M2, T2, id, anim, cat, n.nombre);
       }
     }
-    for (const k of n.kids) caminar(k, env, M2, T2, id, enModulo, anim, cat, enCorr || (n.corredera && n.objeti === "PT"), marco);
+    for (const k of n.kids) caminar(k, env, M2, T2, id, enModulo, anim, cat, enCorr || (n.corredera && n.objeti === "PT"), marco, recon);
   };
+
+  const sinContenido = (nodos: Nodo[]) => nodos.length > 0 && nodos.every((k) => !tieneGeometria(k) && k.camino.length < 3);
+  reconEncimera = sinContenido(escena.kids.filter((k) => k.objeti === "EN" && k.catalogo === "1"));
+  const encimeraVisible = (n: Nodo): boolean =>
+    n.kids.some((c) => !c.nuncaVisible && ((c.objeti === "EN" && c.prims.some((q) => !q.invisible && !q.sinEti)) || encimeraVisible(c)));
 
   for (const k of escena.kids) {
     if (k.idEscena === null) continue;
@@ -1187,6 +1232,8 @@ export function interpretarEscena3D(texto: string, opciones: OpcionesInterprete 
         frente: frenteDe(k),
         dim: [env.L ?? 0, env.H ?? 0, env.P ?? 0],
       });
+      moduloConEncimera = encimeraVisible(k);
+      catDeModulo.set(k.idEscena, k.catalogo);
       caminar(k, {}, ID3, [0, 0, 0], k.idEscena, true, null, k.catalogo);
     } else if (k.objeti === "TQ" || k.objeti === "CL" || k.objeti === "VG") {
       // Tabique, columna o viga del cuarto: caras (`cara0…5`, TQC/CLC) o polígono (VG), en el catálogo 641.
@@ -1204,14 +1251,29 @@ export function interpretarEscena3D(texto: string, opciones: OpcionesInterprete 
       if (k.tile && !out.sueloTile) out.sueloTile = k.tile;
     }
   }
+  // Una animación sin ninguna pieza (la hoja o el cajón se omitieron: invisibles o sin medida) no abre nada: se descarta
+  // para que el visor no ofrezca un botón que no mueve nada.
+  const conPiezas = new Set<number>();
+  for (const c of out.cajas) if (c.a !== undefined) conPiezas.add(c.a);
+  for (const q of out.mallas) if (q.a !== undefined) conPiezas.add(q.a);
+  if (conPiezas.size < out.animaciones.length) {
+    const nuevo = new Map<number, number>();
+    out.animaciones = out.animaciones.filter((_, i) => {
+      if (!conPiezas.has(i)) return false;
+      nuevo.set(i, nuevo.size);
+      return true;
+    });
+    for (const c of out.cajas) if (c.a !== undefined) c.a = nuevo.get(c.a);
+    for (const q of out.mallas) if (q.a !== undefined) q.a = nuevo.get(q.a);
+  }
   out.suelo = inicioParedes;
   // Los colores de un mueble son de su catálogo; paredes y piso son decoración (catálogo 641).
   const catDe = new Map(out.modulos.map((m) => [m.idEscena, m.catalogo]));
   out.materiales = [
     ...new Set(
       [
-        ...out.cajas.filter((c) => c.m !== "").map((c) => `${c.k ?? catDe.get(c.mod ?? -1) ?? "4"}/${c.m}`),
-        ...out.mallas.filter((q) => q.m !== "").map((q) => `${q.k ?? catDe.get(q.mod ?? -1) ?? "4"}/${q.m}`),
+        ...out.cajas.filter((c) => c.m !== "").map((c) => `${c.k ?? catDe.get(c.mod ?? -1) ?? CAT_DEFECTO}/${c.m}`),
+        ...out.mallas.filter((q) => q.m !== "").map((q) => `${q.k ?? catDe.get(q.mod ?? -1) ?? CAT_DEFECTO}/${q.m}`),
         ...out.paredes.filter((w) => w.m).map((w) => `641/${w.m}`),
         ...(out.materialSuelo ? [`641/${out.materialSuelo}`] : []),
       ],

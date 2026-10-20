@@ -31,6 +31,13 @@ enum PedidoEstado {
   ELIMINADO
 }
 
+// Línea de producto de un módulo (mueble). Se asigna al sincronizar la orden según el
+// idCatalogo de TeoWin: 3 = COCINAS, 4 = PLACARES. Una orden/pedido puede ser mixto.
+enum LineaProducto {
+  PLACARES
+  COCINAS
+}
+
 enum ModuloEstado {
   PENDIENTE
   EN_PRODUCCION
@@ -91,6 +98,7 @@ model Modulo {
   pedido_id    String       @db.Uuid
   idEscena     Int
   descripcion  String
+  linea        LineaProducto // PLACARES o COCINAS (idCatalogo de la fila raíz del módulo; ver sync/linea-producto.ts)
   estado       ModuloEstado @default(PENDIENTE)
   creado_en    DateTime     @default(now())
   eliminado_en DateTime?
