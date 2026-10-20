@@ -34,6 +34,7 @@ import {
   listarEstados,
   MAX_OPERARIOS,
   operariosDe,
+  predeterminadosDe,
 } from "./services/configuracion-usuarios.service";
 
 // Planillas de producción de Termolaminado (diseño.md §14). Montado en /api/planillas.
@@ -130,7 +131,9 @@ planillasRouter.get(
 planillasRouter.get(
   "/operarios",
   requierePermiso(PERMISOS.PLANILLAS_VER),
-  catchAsync(async (req, res) => sendResponse(res, 200, { operarios: await operariosDe(req.usuario!.id) })),
+  catchAsync(async (req, res) =>
+    sendResponse(res, 200, { operarios: await operariosDe(req.usuario!.id), predeterminados: await predeterminadosDe(req.usuario!.id) }),
+  ),
 );
 
 // Configuración por usuario de fábrica (técnica): planillas que completa, estado de producción y operarios.

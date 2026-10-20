@@ -13,6 +13,7 @@ API que sincroniza información de piezas de placares desde **TeoWin** (el ERP d
 3. [Estructura de carpetas](#estructura-de-carpetas)
 4. [Variables de entorno](#variables-de-entorno)
 5. [Cómo levantarlo](#cómo-levantarlo)
+   - [Flujo de ramas (git)](#flujo-de-ramas-git)
 6. [Modelo de datos](#modelo-de-datos)
 7. [Reglas de negocio importantes](#reglas-de-negocio-importantes)
 8. [Documentación de la API](#documentación-de-la-api)
@@ -171,6 +172,18 @@ Otros comandos útiles:
 | `npm run texturas3d:sincronizar` | Copia a la base todas las texturas de las carpetas de colores de TeoWin (catálogos 4, 3, 658 y decoración 641; ~60 MB; idempotente). Ver `diseño.md` §13.5 |
 | `npm run termolaminado:sembrar` | Siembra la base de **prueba** con partes de producción, planificación y estados de ejemplo de Termolaminado (diseño.md §14.7). Se niega a correr si `DATABASE_URL` no apunta a `Neostone_test` |
 | `npm run usuario:sql -- "<nombre>" <rol> <pin>` | Imprime el `INSERT` para dar de alta un usuario (ver [Alta de usuarios](#alta-de-usuarios)) |
+
+---
+
+## Flujo de ramas (git)
+
+Detalle en `diseño.md` §15 (vale para este repo y el otro).
+
+- **`main`** es producción. Solo recibe merges de `dev` (`--no-ff`) cuando el usuario lo pide y lo autoriza; el push de `main` también es solo con autorización.
+- **`dev`** es la rama de integración: se levanta contra la base de prueba `Neostone_test` y no se desarrolla directo sobre ella.
+- **Ramas de trabajo** (una por cambio y por repo; los commits van en español): `fix/<tema>`, `feature/<tema>` y `docs/<tema>` salen de `dev`, se prueban contra `Neostone_test` y vuelven a `dev` con merge `--no-ff`. No se borran ramas sin pedido.
+- **Base de datos**: toda migración nueva (aditiva, con `down.sql`) se prueba primero en `Neostone_test`; en `Neostone` (producción) solo se aplica cuando el usuario lo pide expresamente, con respaldo previo (`pg_dump`) y verificación de solo lectura después. Nunca se siembran datos de prueba en producción.
+- `feature/seguimiento-termolaminado` (versión 1, ya en `main`) se conserva como historial.
 
 ---
 
@@ -358,7 +371,8 @@ Detalle completo en `diseño.md` §14. Lo que hay que tener presente al tocar el
 - **PVC**: `cantidad_piezas` = `mesa_chica + mesa_grande`, calculada por el backend; `colores` en mayúsculas y sin puntos; solo las filas de PVC aceptan fotos (hasta 12 por fila, JPG/PNG/WEBP por firma, máx. 8 MB, `bytea`, borrado lógico).
 - **N° de pedido**: texto libre en mayúsculas; si coincide exactamente con un pedido sincronizado se guarda también `pedido_id`.
 - **Configuración por usuario** (la hace técnica, `planillas.configurar`): `usuario_planilla` (planillas que completa; `PUT /planillas/dia/...` y las fotos devuelven `403` si la estación no está asignada), `usuario_estado_produccion` (el estado que marca en la planificación; un estado puede repetirse entre usuarios) y `usuario_operario` (sus operarios). La sesión (`GET /auth/me`) devuelve `planillas`.
-- **Operarios**: los de **su estación** (`usuario_operario`); en cada planilla se eligen a mano (`operarios` en el `PUT`, deben ser los del usuario o estar ya en la planilla) y se guardan como nombre, así que cambiar la lista no altera las planillas existentes.
+- **Operarios**: los de **su estación** (`usuario_operario`); en cada planilla se eligen a mano (`operarios` en el `PUT`, deben ser los del usuario o estar ya en la planilla) y se guardan como nombre, así que cambiar la lista no altera las planillas existentes. **Preselección**: `GET /planillas/operarios` devuelve también `predeterminados` por estación (`usuario_planilla.operarios_predeterminados`): lo último que el usuario dejó elegido en esa estación mientras completaba una planilla (borrador o cierre; corregir una guardada no lo cambia) o, sin historial o si marcó a todos (`null`), todos sus operarios. La configuración que guarda técnica (`PUT /planillas/accesos/:usuarioId`) conserva estos valores de las estaciones que siguen asignadas.
+- **Zona horaria**: el backend usa UTC para «hoy» (rango por defecto de registros/indicadores y semana por defecto de la planificación); el frontend manda sus fechas locales. Ver `diseño.md` §14.6.
 - **Planificación semanal por sistema** (`planificacion_item`, `planificacion_marca`, `estado_produccion`): técnica (`documentacion.gestionar`) carga a mano las filas de pedidos y reclamos de cada semana (lunes); quien tiene un estado de producción asignado marca/desmarca ese estado en cada fila (`PUT /planificacion/items/:id/marca`). Ver con `documentacion.ver`. Ya no hay carga de PDF/imagen.
 - **Visibilidad de registros**: el rol `fabrica` solo ve los registros de las planillas que tiene asignadas (`GET /planillas/registros`, `/dia/...`, `/:id`, `/versiones/:id`, `/fotos/:id`, `/trazabilidad`, sugerencias y colores); técnica, gerencia y admin ven todas. Una estación no visible responde `403`; sin planillas asignadas, el listado queda vacío y la trazabilidad responde `403` (`estacionesVisibles` en `planillas.router.ts`).
 - Esta feature **no lee ni escribe en TeoWin**. Permisos: `planillas.completar`, `planillas.ver`, `planillas.indicadores`, `planillas.configurar` (tabla de la regla 9).

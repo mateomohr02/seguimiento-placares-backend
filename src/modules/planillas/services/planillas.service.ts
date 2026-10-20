@@ -224,6 +224,16 @@ export async function guardarPlanilla(estacion: Estacion, fechaStr: string, body
     for (const n of elegidos) {
       if (!pool.has(n) && !existente.operarios.includes(n)) throw new AppError(`El operario "${n}" no está entre los operarios de tu estación.`, 400);
     }
+    // Mientras la planilla se completa (borrador o cierre) lo elegido pasa a ser lo que se preselecciona la próxima vez en esta
+    // estación (null = todos, para que un operario nuevo aparezca marcado); corregir una ya guardada no lo cambia.
+    if (existente.estado !== "GUARDADA") {
+      const elegidosDelPool = elegidos.filter((n) => pool.has(n));
+      const todos = pool.size > 0 && [...pool].every((n) => elegidosDelPool.includes(n));
+      await tx.usuarioPlanilla.updateMany({
+        where: { usuario_id: usuarioId, estacion },
+        data: { operarios_predeterminados: todos ? Prisma.DbNull : elegidosDelPool },
+      });
+    }
 
     const planillaId = existente.id;
     const idsExistentes = new Set(existente.filas.map((f) => f.id));
