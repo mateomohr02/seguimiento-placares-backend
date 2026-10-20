@@ -88,6 +88,8 @@ app/backend/
 │       ├── planos-pedido/      # Planos por pedido (imagen JPG/PNG/WEBP o PDF), módulo opcional + anotaciones
 │       ├── escenas-pedido/     # Escenas 3D por pedido (.3d de TeoWin): solo lectura, sin anotaciones. parser/ interpreta el .3d a una geometría liviana (regla 10)
 │       ├── texturas-3d/        # Texturas de los materiales de las escenas 3D, por catálogo (copiadas de la carpeta de TeoWin a la base)
+│       ├── planillas/          # Planillas de producción de Termolaminado (Lijado, Encolado, PVC): borrador/guardada, versiones, fotos, operarios, tabla, indicadores y trazabilidad (regla 11)
+│       ├── planificacion/      # Planificación semanal (pedidos y reclamos) de Termolaminado cargada por sistema por técnica, con el marcado de estados de producción por fila (regla 11)
 │       ├── auth/                # Login por PIN, sesión (token firmado), middlewares autenticar / requierePermiso y claves de permiso
 │       └── sync/                # Las queries de solo-lectura contra TeoWin + agrupar-despiece.ts (cuántas piezas físicas es cada fila)
 ├── scripts/
@@ -167,6 +169,7 @@ Otros comandos útiles:
 | `npm run escenas3d:reinterpretar` | Rehace las escenas 3D guardadas con la versión actual del intérprete, desde el `.3d` original de la base (`-- --todas`, `-- --nombre=26-02568`) |
 | `npm run escenas3d:probar -- <carpeta>` | Corre el intérprete sobre una carpeta de `.3d` (copias, nunca la de TeoWin) e informa tiempo, piezas, tamaño del JSON y problemas; no usa la base |
 | `npm run texturas3d:sincronizar` | Copia a la base todas las texturas de las carpetas de colores de TeoWin (catálogos 4, 3, 658 y decoración 641; ~60 MB; idempotente). Ver `diseño.md` §13.5 |
+| `npm run termolaminado:sembrar` | Siembra la base de **prueba** con partes de producción, planificación y estados de ejemplo de Termolaminado (diseño.md §14.7). Se niega a correr si `DATABASE_URL` no apunta a `Neostone_test` |
 | `npm run usuario:sql -- "<nombre>" <rol> <pin>` | Imprime el `INSERT` para dar de alta un usuario (ver [Alta de usuarios](#alta-de-usuarios)) |
 
 ---
@@ -346,6 +349,20 @@ Antes había botones y endpoints manuales para finalizar módulos y pedidos y pa
 - **Texturas** (`texturas-3d`): al subir una escena, el backend copia a la tabla `textura_3d` la textura de cada material (`escena.materiales`, como `catálogo/código`) desde `TEOWIN_3D_DIR`; si el disco no responde, la carga de la escena **no falla**. Los colores de un mueble se buscan en el catálogo del mueble (4 Placares, 3 Cocinas); paredes y piso, en el 641 (decoración). El visor pide cada textura por `GET /api/texturas-3d/:catalogo/:material` (se copia sola la primera vez). Detalle y límites: `diseño.md` §13.5.
 - Subir `PARSER_VERSION` cuando cambie el formato de salida del intérprete y rehacer las escenas guardadas con `npm run escenas3d:reinterpretar`. La salida incluye `cajas`, `mallas` (cortinas, tubos, bachas…), `paredes` (con huecos) y `animaciones`. Los objetos `esBiblioteca` se leen de `TEOWIN_3D_DIR` (solo lectura). `npm run escenas3d:probar -- <carpeta>` prueba el intérprete contra copias de `.3d` sin tocar la base.
 
+### 11. Seguimiento de Termolaminado (planillas)
+
+Detalle completo en `diseño.md` §14. Lo que hay que tener presente al tocar el módulo `planillas`:
+
+- **Una planilla por estación y día** (`LIJADO`, `ENCOLADO`, `PVC`; única por `area + estacion + fecha`). El formulario manda siempre el estado completo con `PUT /planillas/dia/:estacion/:fecha` (upsert): sirve para el guardado automático del borrador (`estado: BORRADOR`) y para cerrarla o corregirla (`estado: GUARDADA`). Las filas llevan su `id` una vez creadas; las que no se mandan se borran (con sus fotos).
+- **Corregir una `GUARDADA`** guarda antes la versión previa en `planilla_version` (con quién la guardó/reemplazó y cuándo). Una `GUARDADA` no vuelve a `BORRADOR` (`409`). Un `BORRADOR` acepta filas incompletas; al guardar, cada fila necesita pedido, hora de inicio y cantidad (en PVC, mesa chica y/o grande).
+- **PVC**: `cantidad_piezas` = `mesa_chica + mesa_grande`, calculada por el backend; `colores` en mayúsculas y sin puntos; solo las filas de PVC aceptan fotos (hasta 12 por fila, JPG/PNG/WEBP por firma, máx. 8 MB, `bytea`, borrado lógico).
+- **N° de pedido**: texto libre en mayúsculas; si coincide exactamente con un pedido sincronizado se guarda también `pedido_id`.
+- **Configuración por usuario** (la hace técnica, `planillas.configurar`): `usuario_planilla` (planillas que completa; `PUT /planillas/dia/...` y las fotos devuelven `403` si la estación no está asignada), `usuario_estado_produccion` (el estado que marca en la planificación; un estado puede repetirse entre usuarios) y `usuario_operario` (sus operarios). La sesión (`GET /auth/me`) devuelve `planillas`.
+- **Operarios**: los de **su estación** (`usuario_operario`); en cada planilla se eligen a mano (`operarios` en el `PUT`, deben ser los del usuario o estar ya en la planilla) y se guardan como nombre, así que cambiar la lista no altera las planillas existentes.
+- **Planificación semanal por sistema** (`planificacion_item`, `planificacion_marca`, `estado_produccion`): técnica (`documentacion.gestionar`) carga a mano las filas de pedidos y reclamos de cada semana (lunes); quien tiene un estado de producción asignado marca/desmarca ese estado en cada fila (`PUT /planificacion/items/:id/marca`). Ver con `documentacion.ver`. Ya no hay carga de PDF/imagen.
+- **Visibilidad de registros**: el rol `fabrica` solo ve los registros de las planillas que tiene asignadas (`GET /planillas/registros`, `/dia/...`, `/:id`, `/versiones/:id`, `/fotos/:id`, `/trazabilidad`, sugerencias y colores); técnica, gerencia y admin ven todas. Una estación no visible responde `403`; sin planillas asignadas, el listado queda vacío y la trazabilidad responde `403` (`estacionesVisibles` en `planillas.router.ts`).
+- Esta feature **no lee ni escribe en TeoWin**. Permisos: `planillas.completar`, `planillas.ver`, `planillas.indicadores`, `planillas.configurar` (tabla de la regla 9).
+
 ### 9. Usuarios, roles y permisos
 
 Todo `/api/*` exige sesión salvo `GET /api/health` y `POST /api/auth/login`. Cada ruta, además, declara el permiso que necesita (`requierePermiso(PERMISOS.…)` en su router).
@@ -369,6 +386,12 @@ Todo `/api/*` exige sesión salvo `GET /api/health` y `POST /api/auth/login`. Ca
 | `documentacion.gestionar` | Subir y eliminar hojas de corte, documentos y planos | ✔ | ✔ | — | — |
 | `ordenes.gestionar` | Agregar, archivar y eliminar órdenes | ✔ | ✔ | — | — |
 | `usuarios.gestionar` | Alta y baja de usuarios (previsto; hoy se hace por base) | ✔ | ✔ | — | — |
+| `planillas.completar` | Completar, guardar y corregir las planillas de producción de Termolaminado y sus fotos | ✔ | ✔ | ✔ | — |
+| `planillas.ver` | Ver registros, indicadores y trazabilidad de las planillas | ✔ | ✔ | ✔ | ✔ |
+| `planillas.indicadores` | Ver los indicadores de producción de Termolaminado | ✔ | ✔ | — | ✔ |
+| `planillas.configurar` | Configurar estados de producción, planillas y operarios de cada usuario | ✔ | ✔ | — | — |
+
+La planificación semanal de Termolaminado no tiene permiso propio: usa `documentacion.ver` (ver) y `documentacion.gestionar` (subir y eliminar). Ojo: hoy **todo usuario `fabrica`** recibe `planillas.completar` (no hay un rol solo de Termolaminado).
 
 Los usuarios `fabrica` son las estaciones de trabajo (`cortadora1`, `rover1`, `armado1`, …); `gerencia` queda previsto para un panel de información futuro. Ver `diseño.md` §12 para los motivos.
 
@@ -494,6 +517,33 @@ Mismo esquema que las hojas de corte, colgando del pedido.
 |---|---|---|
 | `GET /texturas-3d/:catalogo/:material` | Imagen de la textura del material en ese catálogo (`documentacion.ver`). La copia desde la carpeta de TeoWin la primera vez | binario `image/jpeg` o `image/png`. `404` si no existe |
 | `POST /texturas-3d/:catalogo/:material` | Alta o reemplazo manual (`documentacion.gestionar`). **Body: la imagen cruda** (`image/jpeg` o `image/png`, máx. 8 MB, se verifica la firma) | `data`: `{ clave, tamano }` |
+
+### Planillas de Termolaminado
+
+Todas bajo `/api/planillas`. `estacion` es `lijado`, `encolado` o `pvc`; `fecha`, `AAAA-MM-DD`.
+
+| Método y ruta | Permiso | Qué hace |
+|---|---|---|
+| `GET /planillas/dia/:estacion/:fecha` | `planillas.ver` | La planilla de ese día con sus filas, fotos (metadatos) y versiones; `data: null` si no existe |
+| `PUT /planillas/dia/:estacion/:fecha` | `planillas.completar` | Crea o actualiza con `{ estado: "BORRADOR" \| "GUARDADA", filas: [{ id?, hora_inicio, hora_fin, pedido_codigo, cantidad_piezas, observaciones, colocacion_pvc, perfilado, colores, mesa_chica, mesa_grande }] }`. `400` (datos inválidos, mensaje legible), `409` (una guardada no vuelve a borrador) |
+| `GET /planillas/:id` · `GET /planillas/versiones/:id` | `planillas.ver` | Detalle de una planilla / una versión previa (`datos`) |
+| `GET /planillas/registros?desde&hasta&estacion&estado&pedido` | `planillas.ver` (+ planilla asignada si es `fabrica`) | Tabla cruda: una fila por registro con `fotos` (cantidad) y `versiones`. Por defecto, los últimos 30 días |
+| `GET /planillas/indicadores?desde&hasta` | `planillas.indicadores` | Por estación, por día y estado de los pedidos del período |
+| `GET /planillas/trazabilidad?pedido=` | `planillas.ver` | Recorrido de un pedido por las tres estaciones |
+| `GET /planillas/pedidos-sugeridos?q=` · `GET /planillas/colores` | `planillas.ver` | Autocompletado de N° de pedido y de códigos de color |
+| `GET /planillas/accesos` · `PUT /planillas/accesos/:usuarioId` | `planillas.configurar` | Configuración por usuario: `{ estaciones: ["LIJADO","ENCOLADO","PVC"], estado_id, operarios: ["Fabián"] }` |
+| `GET`/`PUT /planillas/estados` | `planillas.configurar` | Catálogo de estados de producción: `{ estados: [{ id?, nombre, color? (#rrggbb) }] }` (`409` si se quita uno asignado o con marcas) |
+| `GET /planillas/operarios` | `planillas.ver` | Los operarios de la estación del usuario: `{ operarios: ["Fabián", "Carlos"] }` |
+| `POST /planillas/filas/:filaId/fotos` | `planillas.completar` | **Body: la imagen cruda** (`image/jpeg`, `png` o `webp`). Solo filas de PVC. `201`: `{ id, mime, tamano, creado_en }` |
+| `GET`/`DELETE /planillas/fotos/:fotoId` | `planillas.ver` / `planillas.completar` | Imagen / borrado lógico |
+
+### Planificación semanal de Termolaminado
+
+| Método y ruta | Permiso | Qué hace |
+|---|---|---|
+| `GET /planificacion?semana=AAAA-MM-DD` | `documentacion.ver` | La semana (por defecto la actual; se normaliza a su lunes): `{ semana_inicio, semanas[], estados[], mi_estado, items[] }`, cada fila con sus `marcas` (estado, quién, cuándo) |
+| `POST /planificacion/items` · `PUT /planificacion/items/:id` · `DELETE /planificacion/items/:id` | `documentacion.gestionar` | Alta, edición y baja lógica de una fila. Body: `{ tipo: "PEDIDOS" \| "RECLAMOS", semana, cliente, n_tw, n_orden, modelo, color, fabrica, fecha_limite, distribuidor, ticket, tipo_reclamo, compromiso, finalizado_en, observaciones }` (hace falta cliente o N° TW) |
+| `PUT /planificacion/items/:id/marca` | `documentacion.ver` + estado asignado | `{ marcado: true \| false }`: marca o quita el estado de producción del usuario en la fila (`403` si no tiene estado asignado) |
 
 ### Piezas
 

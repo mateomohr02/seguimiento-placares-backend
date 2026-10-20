@@ -322,9 +322,24 @@ model Usuario {
   ultimo_acceso  DateTime?
 
   rol Rol @relation(fields: [rol_id], references: [id])
+  planillas UsuarioPlanilla[]
+  operarios UsuarioOperario[]
+  estadoProduccion UsuarioEstadoProduccion?
 
   @@index([rol_id])
   @@map("usuario")
+}
+
+// Qué planillas de Termolaminado puede completar cada usuario (las asigna técnica). Un
+// usuario puede tener ninguna, algunas o todas. Aditiva (diseño.md §14).
+model UsuarioPlanilla {
+  usuario_id String           @db.Uuid
+  estacion   PlanillaEstacion
+
+  usuario Usuario @relation(fields: [usuario_id], references: [id], onDelete: Cascade)
+
+  @@id([usuario_id, estacion])
+  @@map("usuario_planilla")
 }
 
 // Escenas 3D de un pedido (archivo .3d de TeoWin) — feature/visor-escenas-3d. Solo
@@ -363,4 +378,195 @@ model Textura3D {
   creado_en DateTime @default(now())
 
   @@map("textura_3d")
+}
+
+// Seguimiento productivo del área de Termolaminado — feature/seguimiento-termolaminado
+// (diseño.md §14). Tablas nuevas y aditivas; no tocan ninguna existente.
+enum PlanillaEstacion {
+  LIJADO
+  ENCOLADO
+  PVC
+}
+
+enum PlanillaEstado {
+  BORRADOR
+  GUARDADA
+}
+
+enum PlanificacionTipo {
+  PEDIDOS
+  RECLAMOS
+}
+
+// Una planilla por estación y día (`fecha` es el día de la carga). Se completa durante
+// el día como BORRADOR (se guarda sola en el servidor, no se pierde si se cierra la
+// sesión) y se cierra como GUARDADA. Corregir una planilla GUARDADA guarda antes la
+// versión previa en `planilla_version`. `operarios` es la copia de los nombres
+// configurados por técnica al crearla.
+model PlanillaProduccion {
+  id            String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  area          String           @default("TERMOLAMINADO")
+  estacion      PlanillaEstacion
+  fecha         DateTime         @db.Date
+  estado        PlanillaEstado   @default(BORRADOR)
+  operarios     String[]
+  creado_por    String
+  modificado_por String
+  creado_en     DateTime         @default(now())
+  actualizado_en DateTime        @default(now())
+  guardada_en   DateTime?
+
+  filas     PlanillaFila[]
+  versiones PlanillaVersion[]
+
+  @@unique([area, estacion, fecha])
+  @@index([fecha])
+  @@map("planilla_produccion")
+}
+
+// Una fila = un pedido trabajado. `pedido_codigo` es el texto cargado (mayúsculas);
+// `pedido_id` solo se completa si coincide exactamente con un pedido sincronizado.
+// En PVC `cantidad_piezas` = mesa_chica + mesa_grande (lo calcula el backend).
+model PlanillaFila {
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  planilla_id     String   @db.Uuid
+  orden           Int
+  hora_inicio     String?
+  hora_fin        String?
+  pedido_codigo   String   @default("")
+  pedido_id       String?  @db.Uuid
+  cantidad_piezas Int?
+  observaciones   String?
+  colocacion_pvc  String?
+  perfilado       String?
+  colores         String?
+  mesa_chica      Int?
+  mesa_grande     Int?
+
+  planilla PlanillaProduccion @relation(fields: [planilla_id], references: [id], onDelete: Cascade)
+  fotos    PlanillaFoto[]
+
+  @@index([planilla_id])
+  @@index([pedido_codigo])
+  @@map("planilla_fila")
+}
+
+// Foto de la pieza antes de termolaminar (filas de PVC). Archivo en bytea, borrado lógico.
+model PlanillaFoto {
+  id           String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  fila_id      String    @db.Uuid
+  mime         String
+  tamano       Int
+  contenido    Bytes
+  creado_en    DateTime  @default(now())
+  eliminado_en DateTime?
+
+  fila PlanillaFila @relation(fields: [fila_id], references: [id], onDelete: Cascade)
+
+  @@index([fila_id])
+  @@map("planilla_foto")
+}
+
+// Versión previa de una planilla GUARDADA, tomada justo antes de aplicar una corrección.
+model PlanillaVersion {
+  id            String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  planilla_id   String   @db.Uuid
+  version       Int
+  datos         Json
+  guardada_por  String
+  guardada_en   DateTime
+  reemplazada_por String
+  reemplazada_en DateTime @default(now())
+
+  planilla PlanillaProduccion @relation(fields: [planilla_id], references: [id], onDelete: Cascade)
+
+  @@unique([planilla_id, version])
+  @@map("planilla_version")
+}
+
+// Operarios que trabajan en la estación de un usuario de fábrica (los configura técnica): salen
+// como opciones al completar sus planillas. Se guardan por nombre.
+model UsuarioOperario {
+  id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  usuario_id String   @db.Uuid
+  nombre     String
+  orden      Int      @default(0)
+  creado_en  DateTime @default(now())
+
+  usuario Usuario @relation(fields: [usuario_id], references: [id], onDelete: Cascade)
+
+  @@unique([usuario_id, nombre])
+  @@map("usuario_operario")
+}
+
+// Estados de producción que define técnica (ej. "Listo Termolaminado"). A cada usuario de fábrica
+// se le asigna uno (puede repetirse entre usuarios): es el que marca en la planificación.
+model EstadoProduccion {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  nombre    String   @unique
+  color     String? // #rrggbb: con el que se ve el estado en la planificación
+  orden     Int      @default(0)
+  creado_en DateTime @default(now())
+
+  usuarios UsuarioEstadoProduccion[]
+  marcas   PlanificacionMarca[]
+
+  @@map("estado_produccion")
+}
+
+model UsuarioEstadoProduccion {
+  usuario_id String @id @db.Uuid
+  estado_id  String @db.Uuid
+
+  usuario Usuario          @relation(fields: [usuario_id], references: [id], onDelete: Cascade)
+  estado  EstadoProduccion @relation(fields: [estado_id], references: [id], onDelete: Restrict)
+
+  @@index([estado_id])
+  @@map("usuario_estado_produccion")
+}
+
+// Planificación semanal que carga técnica a mano: una fila por pedido (o por reclamo). Los pedidos usan
+// cliente / n_tw / n_orden / modelo / color / fabrica / fecha_limite; los reclamos, cliente / distribuidor /
+// ticket / n_tw / tipo_reclamo / color / compromiso / finalizado_en / observaciones. `semana_inicio` es el
+// lunes. Borrado lógico.
+model PlanificacionItem {
+  id            String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  area          String            @default("TERMOLAMINADO")
+  tipo          PlanificacionTipo
+  semana_inicio DateTime          @db.Date
+  orden         Int               @default(0)
+  cliente       String            @default("")
+  n_tw          String            @default("")
+  n_orden       String?
+  modelo        String?
+  color         String?
+  fabrica       DateTime?         @db.Date
+  fecha_limite  DateTime?         @db.Date
+  distribuidor  String?
+  ticket        String?
+  tipo_reclamo  String?
+  compromiso    DateTime?         @db.Date
+  finalizado_en DateTime?         @db.Date
+  observaciones String?
+  creado_en     DateTime          @default(now())
+  eliminado_en  DateTime?
+
+  marcas PlanificacionMarca[]
+
+  @@index([area, semana_inicio, tipo])
+  @@map("planificacion_item")
+}
+
+// Un estado de producción marcado en una fila de la planificación, por el usuario que lo tiene asignado.
+model PlanificacionMarca {
+  item_id     String   @db.Uuid
+  estado_id   String   @db.Uuid
+  marcado_por String
+  marcado_en  DateTime @default(now())
+
+  item   PlanificacionItem @relation(fields: [item_id], references: [id], onDelete: Cascade)
+  estado EstadoProduccion  @relation(fields: [estado_id], references: [id], onDelete: Cascade)
+
+  @@id([item_id, estado_id])
+  @@map("planificacion_marca")
 }

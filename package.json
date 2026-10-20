@@ -14,7 +14,8 @@
     "usuario:sql": "tsx scripts/usuario-sql.ts",
     "texturas3d:sincronizar": "tsx scripts/texturas-3d-sincronizar.ts",
     "escenas3d:reinterpretar": "tsx scripts/escenas-3d-reinterpretar.ts",
-    "escenas3d:probar": "tsx scripts/escenas-3d-probar.ts"
+    "escenas3d:probar": "tsx scripts/escenas-3d-probar.ts",
+    "termolaminado:sembrar": "tsx scripts/termolaminado-sembrar.ts"
   },
   "dependencies": {
     "@prisma/client": "^5.22.0",
