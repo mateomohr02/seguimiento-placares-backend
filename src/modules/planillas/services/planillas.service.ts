@@ -69,7 +69,7 @@ function planillaDTO(p: PlanillaDB) {
 }
 
 const detalleInclude = {
-  filas: { select: filaSelect, orderBy: { orden: "asc" } },
+  filas: { where: { eliminado_en: null }, select: filaSelect, orderBy: { orden: "asc" } },
   versiones: {
     select: { id: true, version: true, guardada_por: true, guardada_en: true, reemplazada_por: true, reemplazada_en: true },
     orderBy: { version: "desc" },
@@ -185,7 +185,7 @@ export async function guardarPlanilla(estacion: Estacion, fechaStr: string, body
     const where = { area: AREA_TERMOLAMINADO, estacion, fecha };
     let existente = await tx.planillaProduccion.findUnique({
       where: { area_estacion_fecha: where },
-      include: { filas: { select: filaSelect, orderBy: { orden: "asc" } } },
+      include: { filas: { where: { eliminado_en: null }, select: filaSelect, orderBy: { orden: "asc" } } },
     });
 
     if (existente?.estado === "GUARDADA" && body.estado === "BORRADOR") {
@@ -207,7 +207,8 @@ export async function guardarPlanilla(estacion: Estacion, fechaStr: string, body
           datos: {
             estado: existente.estado,
             operarios: existente.operarios,
-            filas: existente.filas.map((f) => ({ ...f, fotos: f.fotos.length })),
+            // Las fotos quedan en la base aunque se quite el ítem (borrado lógico): se guardan sus datos para verlas en el historial.
+            filas: existente.filas.map((f) => ({ ...f, fotos: f.fotos.length, fotos_lista: f.fotos })),
           } as unknown as Prisma.InputJsonValue,
           guardada_por: existente.modificado_por,
           guardada_en: existente.actualizado_en,
@@ -223,13 +224,25 @@ export async function guardarPlanilla(estacion: Estacion, fechaStr: string, body
     for (const n of elegidos) {
       if (!pool.has(n) && !existente.operarios.includes(n)) throw new AppError(`El operario "${n}" no está entre los operarios de tu estación.`, 400);
     }
+    // Mientras la planilla se completa (borrador o cierre) lo elegido pasa a ser lo que se preselecciona la próxima vez en esta
+    // estación (null = todos, para que un operario nuevo aparezca marcado); corregir una ya guardada no lo cambia.
+    if (existente.estado !== "GUARDADA") {
+      const elegidosDelPool = elegidos.filter((n) => pool.has(n));
+      // Sin ninguno elegido (o sin operarios configurados todavía) no se recuerda nada: queda «todos» para no dejar la estación sin preselección.
+      const todos = pool.size === 0 || elegidosDelPool.length === 0 || [...pool].every((n) => elegidosDelPool.includes(n));
+      await tx.usuarioPlanilla.updateMany({
+        where: { usuario_id: usuarioId, estacion },
+        data: { operarios_predeterminados: todos ? Prisma.DbNull : elegidosDelPool },
+      });
+    }
 
     const planillaId = existente.id;
     const idsExistentes = new Set(existente.filas.map((f) => f.id));
     const idsEnviados = body.filas.map((f) => f.id).filter((x): x is string => !!x);
     if (idsEnviados.some((x) => !idsExistentes.has(x))) throw new AppError("Una fila no pertenece a esta planilla.", 400);
 
-    await tx.planillaFila.deleteMany({ where: { planilla_id: planillaId, id: { notIn: idsEnviados } } });
+    // Los ítems que ya no vienen se quitan con borrado lógico: conservan sus datos y sus fotos.
+    await tx.planillaFila.updateMany({ where: { planilla_id: planillaId, eliminado_en: null, id: { notIn: idsEnviados } }, data: { eliminado_en: new Date() } });
 
     for (const [orden, f] of body.filas.entries()) {
       const datos = { ...normalizarFila(estacion, f), orden, pedido_id: pedidos.get(f.pedido_codigo) ?? null };
@@ -280,6 +293,7 @@ export async function listarRegistros(f: FiltrosRegistros) {
   const { desde, hasta } = rango(f.desde, f.hasta);
   const filas = await prisma.planillaFila.findMany({
     where: {
+      eliminado_en: null,
       planilla: {
         area: AREA_TERMOLAMINADO,
         fecha: { gte: desde, lte: hasta },
@@ -338,7 +352,7 @@ interface FilaTraza {
 async function filasPorCodigos(codigos: string[], estaciones: readonly Estacion[] = ESTACIONES): Promise<FilaTraza[]> {
   if (codigos.length === 0) return [];
   const filas = await prisma.planillaFila.findMany({
-    where: { pedido_codigo: { in: codigos }, planilla: { area: AREA_TERMOLAMINADO, estacion: { in: [...estaciones] } } },
+    where: { eliminado_en: null, pedido_codigo: { in: codigos }, planilla: { area: AREA_TERMOLAMINADO, estacion: { in: [...estaciones] } } },
     select: {
       pedido_codigo: true,
       hora_inicio: true,
@@ -406,7 +420,7 @@ export async function trazabilidadDePedido(codigo: string, estaciones: readonly 
 export async function indicadores(desdeRaw?: string, hastaRaw?: string) {
   const { desde, hasta } = rango(desdeRaw, hastaRaw);
   const enRango = await prisma.planillaFila.findMany({
-    where: { planilla: { area: AREA_TERMOLAMINADO, fecha: { gte: desde, lte: hasta } } },
+    where: { eliminado_en: null, planilla: { area: AREA_TERMOLAMINADO, fecha: { gte: desde, lte: hasta } } },
     select: {
       pedido_codigo: true,
       hora_inicio: true,
@@ -472,7 +486,7 @@ export async function sugerirPedidos(q: string, estaciones: readonly Estacion[] 
       distinct: ["codigo_pedido"],
       take: 8,
     }),
-    prisma.planillaFila.findMany({ where: { pedido_codigo: { contains: t }, planilla: { estacion: { in: [...estaciones] } } }, select: { pedido_codigo: true }, distinct: ["pedido_codigo"], take: 8 }),
+    prisma.planillaFila.findMany({ where: { eliminado_en: null, pedido_codigo: { contains: t }, planilla: { estacion: { in: [...estaciones] } } }, select: { pedido_codigo: true }, distinct: ["pedido_codigo"], take: 8 }),
   ]);
   const out = new Map<string, { codigo: string; referencia: string | null }>();
   for (const p of sync) out.set(p.codigo_pedido.toUpperCase(), { codigo: p.codigo_pedido.toUpperCase(), referencia: p.referencia });
@@ -484,7 +498,7 @@ export async function sugerirPedidos(q: string, estaciones: readonly Estacion[] 
 export async function coloresUsados(estaciones: readonly Estacion[] = ESTACIONES) {
   const g = await prisma.planillaFila.groupBy({
     by: ["colores"],
-    where: { colores: { not: null }, planilla: { estacion: { in: [...estaciones] } } },
+    where: { eliminado_en: null, colores: { not: null }, planilla: { estacion: { in: [...estaciones] } } },
     _count: { _all: true },
     orderBy: { _count: { colores: "desc" } },
     take: 200,

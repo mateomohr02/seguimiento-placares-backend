@@ -335,6 +335,8 @@ model Usuario {
 model UsuarioPlanilla {
   usuario_id String           @db.Uuid
   estacion   PlanillaEstacion
+  /// Operarios que se preseleccionan al abrir una planilla nueva de esta estación (lista de nombres). null = todos los del usuario.
+  operarios_predeterminados Json?
 
   usuario Usuario @relation(fields: [usuario_id], references: [id], onDelete: Cascade)
 
@@ -442,6 +444,8 @@ model PlanillaFila {
   colores         String?
   mesa_chica      Int?
   mesa_grande     Int?
+  /// Borrado lógico: un ítem quitado de la planilla se conserva (con sus fotos) para el historial.
+  eliminado_en    DateTime?
 
   planilla PlanillaProduccion @relation(fields: [planilla_id], references: [id], onDelete: Cascade)
   fotos    PlanillaFoto[]
