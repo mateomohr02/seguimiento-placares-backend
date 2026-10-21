@@ -11,12 +11,15 @@ import { evaluar, grupos, oculto, type Entorno } from "./expresion";
 // base, así se puede re-interpretar).
 type Vec3 = [number, number, number];
 
+// v32: la placa de una bisagra de apertura derecha se apoya en la cara interior del lateral (antes quedaba dentro del lateral y
+// asomaba al frente); un contorno de encimera `CPT` sin sólido no se dibuja cuando la encimera ya se reconstruye desde los almacenes
+// de los muebles (salía una mesada doble). El visor deja de listar los módulos de decoración y equipamiento (diseño.md §13.7).
 // v31: bisagras dibujadas como cajas (cuerpo en la hoja y placa en el lateral); el lado de la bisagra y el sentido de giro de una hoja
 // salen de la posición de sus bisagras; un `pos(...)` posterior a una malla ya no pisa la posición del objeto (laterales de cajón
 // Tandembox desplazados); falta de un lateral de cajón (ver diseño.md §13.7).
 // v30: cocinas (catálogo 3): encimera reconstruida cuando el .3d la trae vacía, catálogo de cada pieza
 // siempre explícito si difiere del de su mueble, animaciones sin piezas descartadas (diseño.md §13.7).
-export const PARSER_VERSION = 31;
+export const PARSER_VERSION = 32;
 
 export interface CajaEscena {
   /** idEscena del módulo al que pertenece (null = no asociada). */
@@ -929,6 +932,10 @@ export function interpretarEscena3D(texto: string, opciones: OpcionesInterprete 
 
   // Cocinas: ¿viene vacío el objeto de primer nivel EN (encimera)? Entonces se arma con los trozos que guarda cada mueble.
   let reconEncimera = false;
+  /** Cajas de la encimera reconstruida desde los almacenes (para detectar contornos `CPT` que dibujarían una segunda mesada encima). */
+  const cajasRecon: CajaEscena[] = [];
+  /** Losas hechas con el contorno de un `CPT`/`EN` sin sólido: se descartan al final las que la encimera reconstruida ya cubre. */
+  const losasContorno: { malla: MallaEscena; poli: [number, number][] }[] = [];
   /** El mueble que se está recorriendo ya trae su encimera a la vista (no se repite la del almacén). */
   let moduloConEncimera = false;
   const reconDibujadas = new Set<string>();
@@ -1107,14 +1114,25 @@ export function interpretarEscena3D(texto: string, opciones: OpcionesInterprete 
     if (n.hinge && enModulo && recon === null && env.L !== undefined && env.H !== undefined && env.P !== undefined) {
       const mide = (a: number, b: number, c: number) => Math.abs(env.L - a) < 0.1 && Math.abs(env.H - b) < 0.1 && Math.abs(env.P - c) < 0.1;
       const partes = mide(40.4, 66, 14.5) ? HERRAJE_CUERPO : mide(8.5, 51, 44.5) ? HERRAJE_PLACA : null;
+      // La placa se apoya en la cara interior del lateral y se extiende hacia el fondo del mueble. Con `ang(0,90,0)` (lateral
+      // izquierdo) el grosor de la placa (+Z local) entra al mueble; con `ang(180,-90,0)` (lateral derecho) el marco queda
+      // espejado y la placa entraba en el lateral y asomaba al frente: se gira 180° sobre su eje vertical.
+      let Rh = M2;
+      if (partes === HERRAJE_PLACA && marco) {
+        const ex = apply(marco.M, [1, 0, 0]);
+        const xl = (T2[0] - marco.T[0]) * ex[0] + (T2[1] - marco.T[1]) * ex[1] + (T2[2] - marco.T[2]) * ex[2];
+        const adentro: Vec3 = xl < marco.L / 2 ? ex : [-ex[0], -ex[1], -ex[2]];
+        const z = apply(M2, [0, 0, 1]);
+        if (z[0] * adentro[0] + z[1] * adentro[1] + z[2] * adentro[2] < 0) Rh = mul(M2, rotacion(0, 180, 0));
+      }
       for (const [off, dim] of partes ?? []) {
-        const o = apply(M2, off);
+        const o = apply(Rh, off);
         const caja: CajaEscena = {
           mod: id,
           m: "",
           c: COLOR_HERRAJE,
           t: rv([T2[0] + o[0], T2[1] + o[1], T2[2] + o[2]]),
-          r: M2.map((x) => Math.round(x * 1e4) / 1e4),
+          r: Rh.map((x) => Math.round(x * 1e4) / 1e4),
           s: dim,
           ...(anim !== null ? { a: anim } : {}),
         };
@@ -1271,7 +1289,7 @@ export function interpretarEscena3D(texto: string, opciones: OpcionesInterprete 
           if (reconDibujadas.has(dup)) continue;
           reconDibujadas.add(dup);
         }
-        out.cajas.push({
+        const cajaNueva: CajaEscena = {
           mod: id,
           m: n.objeti === "EN" && pr.m === "enci" && hdrEncimera ? hdrEncimera : pr.m,
           c: pr.c,
@@ -1282,13 +1300,26 @@ export function interpretarEscena3D(texto: string, opciones: OpcionesInterprete 
           ...(pr.opacidad !== null ? { o: pr.opacidad } : {}),
           ...(cat !== catDeModulo.get(id ?? -1) ? { k: cat } : {}),
           ...(pr.etiqueta === "PSJ" ? { p: 1 as const } : {}),
-        });
+        };
+        out.cajas.push(cajaNueva);
+        if (recon !== null) cajasRecon.push(cajaNueva);
       }
     }
     if (enModulo && recon === null && n.camino.length >= 3 && !tieneGeometria(n) && (n.objeti === "SWL" || n.objeti === "EN" || n.objeti === "CPT")) {
       // Encimera sin sólido en el .3d: TeoWin la genera desde el recorrido (cara inferior a 870 mm, 30 mm de espesor).
       const losa = prismaDeContorno(n.camino, 30);
-      if (losa) emitirMalla({ v: losa.v, i: losa.i, uv: null }, { m: "", c: [0.93, 0.93, 0.93], opacidad: null }, M2, T2, id, anim, cat, n.nombre);
+      if (losa) {
+        const antes = out.mallas.length;
+        emitirMalla({ v: losa.v, i: losa.i, uv: null }, { m: "", c: [0.93, 0.93, 0.93], opacidad: null }, M2, T2, id, anim, cat, n.nombre);
+        if (out.mallas.length > antes && n.objeti !== "SWL") {
+          // Contorno en planta (x, z de la escena) para el control de cobertura del final.
+          const poli = n.camino.map((q): [number, number] => {
+            const d = apply(M2, q);
+            return [T2[0] + d[0], T2[2] + d[2]];
+          });
+          losasContorno.push({ malla: out.mallas[out.mallas.length - 1], poli });
+        }
+      }
     }
     if (enModulo && recon === null) {
       for (const mc of n.meshes) {
@@ -1352,6 +1383,49 @@ export function interpretarEscena3D(texto: string, opciones: OpcionesInterprete 
       if (k.materialCad && !out.materialSuelo) out.materialSuelo = k.materialCad;
       if (k.tile && !out.sueloTile) out.sueloTile = k.tile;
     }
+  }
+  // Contornos de encimera (`CPT`) que la encimera reconstruida ya cubre: son la misma mesada dibujada dos veces (la losa del
+  // contorno queda encima, a 900-930 mm, de la reconstruida a 870-900 mm). Se descartan solo si la cubren casi por completo; si
+  // el contorno abarca más (huecos de artefactos, prolongaciones), se conserva como antes.
+  if (cajasRecon.length > 0 && losasContorno.length > 0) {
+    const dentroPoli = (x: number, z: number, poli: [number, number][]) => {
+      let dentro = false;
+      for (let i = 0, j = poli.length - 1; i < poli.length; j = i++) {
+        const [xi, zi] = poli[i];
+        const [xj, zj] = poli[j];
+        if (zi > z !== zj > z && x < ((xj - xi) * (z - zi)) / (zj - zi) + xi) dentro = !dentro;
+      }
+      return dentro;
+    };
+    const dentroCaja = (x: number, z: number, c: CajaEscena) => {
+      const dx = x - c.t[0];
+      const dy = c.s[1] * 0.5 * c.r[4];
+      const dz = z - c.t[2];
+      const lx = c.r[0] * dx + c.r[3] * dy + c.r[6] * dz;
+      const lz = c.r[2] * dx + c.r[5] * dy + c.r[8] * dz;
+      return lx >= -1 && lx <= c.s[0] + 1 && lz >= -1 && lz <= c.s[2] + 1;
+    };
+    const cubiertas = new Set<MallaEscena>();
+    for (const { malla, poli } of losasContorno) {
+      const xs = poli.map((q) => q[0]);
+      const zs = poli.map((q) => q[1]);
+      const x0 = Math.min(...xs);
+      const x1 = Math.max(...xs);
+      const z0 = Math.min(...zs);
+      const z1 = Math.max(...zs);
+      const paso = Math.max(30, Math.sqrt(((x1 - x0) * (z1 - z0)) / 4000));
+      let total = 0;
+      let cubierto = 0;
+      for (let x = x0 + paso / 2; x < x1; x += paso) {
+        for (let z = z0 + paso / 2; z < z1; z += paso) {
+          if (!dentroPoli(x, z, poli)) continue;
+          total++;
+          if (cajasRecon.some((c) => dentroCaja(x, z, c))) cubierto++;
+        }
+      }
+      if (total > 0 && cubierto / total >= 0.9) cubiertas.add(malla);
+    }
+    if (cubiertas.size > 0) out.mallas = out.mallas.filter((m) => !cubiertas.has(m));
   }
   // Una animación sin ninguna pieza (la hoja o el cajón se omitieron: invisibles o sin medida) no abre nada: se descarta
   // para que el visor no ofrezca un botón que no mueve nada.
