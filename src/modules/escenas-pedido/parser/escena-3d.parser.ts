@@ -11,9 +11,12 @@ import { evaluar, grupos, oculto, type Entorno } from "./expresion";
 // base, así se puede re-interpretar).
 type Vec3 = [number, number, number];
 
+// v31: bisagras dibujadas como cajas (cuerpo en la hoja y placa en el lateral); el lado de la bisagra y el sentido de giro de una hoja
+// salen de la posición de sus bisagras; un `pos(...)` posterior a una malla ya no pisa la posición del objeto (laterales de cajón
+// Tandembox desplazados); falta de un lateral de cajón (ver diseño.md §13.7).
 // v30: cocinas (catálogo 3): encimera reconstruida cuando el .3d la trae vacía, catálogo de cada pieza
 // siempre explícito si difiere del de su mueble, animaciones sin piezas descartadas (diseño.md §13.7).
-export const PARSER_VERSION = 30;
+export const PARSER_VERSION = 31;
 
 export interface CajaEscena {
   /** idEscena del módulo al que pertenece (null = no asociada). */
@@ -153,6 +156,8 @@ interface MallaCruda {
   v: number[];
   i: number[];
   uv: number[];
+  /** `pos(x,y,z)` que sigue a la malla: su desplazamiento dentro del objeto. */
+  pos?: string[] | null;
 }
 
 class Nodo {
@@ -201,6 +206,10 @@ class Nodo {
   abierto = false;
   /** Marca `esBiblioteca`: la geometría está en el archivo del catálogo de TeoWin, no en la escena. */
   biblioteca = false;
+  /** Marca `hinge`: pieza de bisagra (su geometría real está en la biblioteca de TeoWin, familia BIS3D/BIB3D). */
+  hinge = false;
+  /** `bisName"B"`: la bisagra es la placa fijada al lateral del mueble (sin él es el cuerpo que va en la hoja). */
+  bisPlaca = false;
   bibliotecaCargada = false;
   /** Contorno `camino(R)(0,0)(x,y,z)…` (losas de encimera que TeoWin genera desde el recorrido). */
   camino: Vec3[] = [];
@@ -531,6 +540,8 @@ function parsearArbol(texto: string): Nodo {
       if (/\besAtrezzo\b/.test(t)) o.atrezzo = true;
       if (/\bopened\b/.test(t)) o.abierto = true;
       if (/\besBiblioteca\b/.test(t)) o.biblioteca = true;
+      if (/\bhinge\b/.test(t)) o.hinge = true;
+      if (/\bbisName"B"/.test(t)) o.bisPlaca = true;
       const aa = /\banguloAper\((\d+(?:\.\d+)?)\)/.exec(t);
       if (aa) o.anguloAper = Number(aa[1]);
       const po = /porcenAperOpn\(([\d.]+)\)/.exec(t);
@@ -545,7 +556,13 @@ function parsearArbol(texto: string): Nodo {
     else if ((m = /^param (\w+)\s*=\s*"(.*)"/.exec(t))) o.param[m[1]] = m[2];
     else if (t.startsWith("virtual(")) o.virtual = grupos(t).slice(0, 2);
     else if (t.startsWith("ang(")) o.ang = grupos(t)[0] ?? null;
-    else if (t.startsWith("pos(")) o.pos = grupos(t)[0] ?? null;
+    else if (t.startsWith("pos(")) {
+      // Un `pos(...)` que sigue a las líneas `malla`/`caras` es la posición de la malla dentro del objeto (casi siempre 0,0,0):
+      // no reemplaza la posición del objeto (el `virtual`/`pos` previo); si no, la malla quedaba en el origen del padre.
+      const g = grupos(t)[0] ?? null;
+      if (o.mallaActual) o.mallaActual.pos = g;
+      else o.pos = g;
+    }
     else if ((m = /(?:^|\s)idEscena\((\d+)\)/.exec(t))) o.idEscena = Number(m[1]);
     else if ((m = /^camino\(R\)\([^)]*\)\(([^)]*)\)/.exec(t))) {
       const q = m[1].split(",").map(Number);
@@ -765,12 +782,50 @@ function buscarPorcen(n: Nodo): number | null {
   return null;
 }
 
+// Herrajes de bisagra como cajas (en el sistema de la pieza `hinge` ya girada por su `ang`): [desplazamiento, tamaño] en mm.
+// Cuerpo de la hoja (C0CS y afines): placa plana de 66 mm y el cuerpo redondo (copa) que sobresale hacia el interior del mueble.
+const HERRAJE_CUERPO: [Vec3, Vec3][] = [
+  [[0, -33, 0], [37.4, 66, 2.2]],
+  [[3, -17.5, 2.2], [34.4, 35, 9.2]],
+];
+// Placa fijada al lateral: base plana (se apoya en el lateral) y el taco donde engancha el brazo.
+const HERRAJE_PLACA: [Vec3, Vec3][] = [
+  [[0, -25.5, 0], [44.5, 51, 3]],
+  [[4, -10, 3], [36, 20, 5.5]],
+];
+const COLOR_HERRAJE: [number, number, number] = [0.72, 0.74, 0.78];
+
 // Espesor por defecto cuando una medida depende de un material (GRCI="matci"): ese
 // valor vive en los scripts del catálogo, no en el .3d.
 const ESPESOR_DEFECTO = 18;
 
 // Solo para escenas que no traen catálogo (pieza sin `k` y sin mueble): el parser siempre lo declara, esto es un respaldo.
 const CAT_DEFECTO = "4";
+
+/**
+ * Centro (x local de la hoja) de las bisagras de cuerpo que cuelgan de una hoja con bisagra, o null si no tiene (puertas de
+ * otros catálogos, bisagras que no son del tipo clásico). Una bisagra izquierda se coloca en `virtual(40.4,…) ang(0,180,0)` y una
+ * derecha en `virtual(L-pl,…) ang(180,0,0)`: el cuerpo (37,4 mm de ancho) siempre queda hacia el interior de la hoja.
+ */
+function centroBisagras(hoja: Nodo, env: Entorno): number | null {
+  const xs: number[] = [];
+  const e: Entorno = { ...env };
+  const rec = (k: Nodo) => {
+    for (const h of k.kids) {
+      if (h.hinge && !h.bisPlaca && h.virtual) {
+        const p = h.virtual[0]?.slice(0, 3).map((x) => evaluar(x, e));
+        const s = h.virtual[1]?.slice(0, 3).map((x) => evaluar(x, e));
+        if (p && s && !p.includes(null) && s[0] !== null && Math.abs(s[0] - 40.4) < 0.1) {
+          const a = (h.ang ?? []).slice(0, 3).map((x) => evaluar(x, e) ?? 0);
+          const d = apply(rotacion(a[0] ?? 0, a[1] ?? 0, a[2] ?? 0), [20.2, 0, 0]);
+          xs.push((p[0] as number) + d[0]);
+        }
+      } else if (!h.hinge) rec(h);
+    }
+  };
+  rec(hoja);
+  return xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null;
+}
 
 /** Opciones del intérprete: `biblioteca` devuelve el texto del `.3d` de un objeto de la biblioteca de TeoWin. */
 export interface OpcionesInterprete {
@@ -869,6 +924,9 @@ export function interpretarEscena3D(texto: string, opciones: OpcionesInterprete 
     });
   };
 
+  // Cajas de bisagra (se dibujan solo si la hoja a la que acompañan se dibuja).
+  const cajasHerraje = new WeakSet<CajaEscena>();
+
   // Cocinas: ¿viene vacío el objeto de primer nivel EN (encimera)? Entonces se arma con los trozos que guarda cada mueble.
   let reconEncimera = false;
   /** El mueble que se está recorriendo ya trae su encimera a la vista (no se repite la del almacén). */
@@ -937,6 +995,7 @@ export function interpretarEscena3D(texto: string, opciones: OpcionesInterprete 
       }
     }
     if (n.idrep !== null) env.idrep = n.idrep;
+    env.pl = env.pl ?? 40.4; // largo de la placa de bisagra: la bisagra de una hoja se ubica en L-pl
     env.getcxh = env.getcxh ?? 0; // altura propia de un cajón/frente: 0 = la del mueble (cmp[getcxh;0;=]*H+getcxh)
     env.mymat = env.mymat ?? ESPESOR_DEFECTO;
     if (n.espesor !== null && n.espesor > 0) for (const v of espesorVars) env[v] = n.espesor;
@@ -1001,8 +1060,18 @@ export function interpretarEscena3D(texto: string, opciones: OpcionesInterprete 
         const pB: Vec3 = [T2[0] + dB[0], T2[1] + dB[1], T2[2] + dB[2]];
         const xa = xPar(pA);
         const xb = xPar(pB);
-        const izquierda = (xa + xb) / 2 <= mk.L / 2 + 1;
-        const bisagra = izquierda ? (xa <= xb ? pA : pB) : xa >= xb ? pA : pB;
+        // El lado de la bisagra lo dicen las bisagras que cuelgan de la hoja (TeoWin las dibuja ahí): una hoja de ancho completo
+        // de un mueble de una sola puerta tiene su centro justo en el medio y la posición no alcanza (`apertura 2` = bisagra a la derecha).
+        const cb = centroBisagras(n, env);
+        let izquierda: boolean;
+        let bisagra: Vec3;
+        if (cb !== null) {
+          bisagra = cb < env.L / 2 ? pA : pB;
+          izquierda = bisagra === pA ? xa <= xb : xb <= xa;
+        } else {
+          izquierda = (xa + xb) / 2 <= mk.L / 2 + 1;
+          bisagra = izquierda ? (xa <= xb ? pA : pB) : xa >= xb ? pA : pB;
+        }
         const eje = apply(mk.M, [0, 1, 0]);
         const grados = n.anguloAper * (buscarPorcen(n) ?? 0.85);
         out.animaciones.push({
@@ -1030,6 +1099,27 @@ export function interpretarEscena3D(texto: string, opciones: OpcionesInterprete 
         const dist = (buscarPorcen(n) ?? 0.85) * (envPadre.L - env.L);
         out.animaciones.push({ tipo: "puerta", mod: id, eje: [r4(e[0]), r4(e[1]), r4(e[2])], dist: r1(dist) });
         anim = out.animaciones.length - 1;
+      }
+    }
+
+    // Bisagras (familia BIS3D/BIB3D): el cuerpo que va en la hoja (40,4×66) y la placa del lateral (8,5×51×44,5) se dibujan como cajas
+    // chicas; la hoja las lleva consigo al girar (heredan su animación). Los otros herrajes (elevables, pistones, push) no se dibujan.
+    if (n.hinge && enModulo && recon === null && env.L !== undefined && env.H !== undefined && env.P !== undefined) {
+      const mide = (a: number, b: number, c: number) => Math.abs(env.L - a) < 0.1 && Math.abs(env.H - b) < 0.1 && Math.abs(env.P - c) < 0.1;
+      const partes = mide(40.4, 66, 14.5) ? HERRAJE_CUERPO : mide(8.5, 51, 44.5) ? HERRAJE_PLACA : null;
+      for (const [off, dim] of partes ?? []) {
+        const o = apply(M2, off);
+        const caja: CajaEscena = {
+          mod: id,
+          m: "",
+          c: COLOR_HERRAJE,
+          t: rv([T2[0] + o[0], T2[1] + o[1], T2[2] + o[2]]),
+          r: M2.map((x) => Math.round(x * 1e4) / 1e4),
+          s: dim,
+          ...(anim !== null ? { a: anim } : {}),
+        };
+        cajasHerraje.add(caja);
+        out.cajas.push(caja);
       }
     }
 
@@ -1203,7 +1293,19 @@ export function interpretarEscena3D(texto: string, opciones: OpcionesInterprete 
     if (enModulo && recon === null) {
       for (const mc of n.meshes) {
         if (mc.invisible) continue;
-        emitirMalla({ v: mc.v, i: mc.i, uv: mc.uv }, { m: mc.m, c: mc.c, opacidad: mc.opacidad }, M2, T2, id, anim, cat, n.nombre);
+        const dm = mc.pos ? evVec(mc.pos, env) : null;
+        if (dm && (dm[0] !== 0 || dm[1] !== 0 || dm[2] !== 0)) {
+          // La malla no se muta (el mismo nodo puede recorrerse más de una vez): se desplaza una copia.
+          const v2 = mc.v.slice();
+          for (let k = 0; k + 2 < v2.length; k += 3) {
+            v2[k] += dm[0];
+            v2[k + 1] += dm[1];
+            v2[k + 2] += dm[2];
+          }
+          emitirMalla({ v: v2, i: mc.i, uv: mc.uv }, { m: mc.m, c: mc.c, opacidad: mc.opacidad }, M2, T2, id, anim, cat, n.nombre);
+          continue;
+        }
+        emitirMalla({ v: mc.v, i: mc.i, uv: mc.uv },{ m: mc.m, c: mc.c, opacidad: mc.opacidad }, M2, T2, id, anim, cat, n.nombre);
       }
     }
     for (const k of n.kids) caminar(k, env, M2, T2, id, enModulo, anim, cat, enCorr || (n.corredera && n.objeti === "PT"), marco, recon);
@@ -1254,8 +1356,10 @@ export function interpretarEscena3D(texto: string, opciones: OpcionesInterprete 
   // Una animación sin ninguna pieza (la hoja o el cajón se omitieron: invisibles o sin medida) no abre nada: se descarta
   // para que el visor no ofrezca un botón que no mueve nada.
   const conPiezas = new Set<number>();
-  for (const c of out.cajas) if (c.a !== undefined) conPiezas.add(c.a);
+  for (const c of out.cajas) if (c.a !== undefined && !cajasHerraje.has(c)) conPiezas.add(c.a);
   for (const q of out.mallas) if (q.a !== undefined) conPiezas.add(q.a);
+  // Las bisagras de una hoja que no se dibuja (todas sus piezas omitidas) tampoco quedan sueltas en el aire.
+  out.cajas = out.cajas.filter((c) => !(cajasHerraje.has(c) && c.a !== undefined && !conPiezas.has(c.a)));
   if (conPiezas.size < out.animaciones.length) {
     const nuevo = new Map<number, number>();
     out.animaciones = out.animaciones.filter((_, i) => {
