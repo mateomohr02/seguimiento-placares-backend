@@ -11,6 +11,8 @@ import { evaluar, grupos, oculto, type Entorno } from "./expresion";
 // base, así se puede re-interpretar).
 type Vec3 = [number, number, number];
 
+// v33: los perfiles de aluminio con inglete de las puertas de vidrio (familia PER, `extrude` en un plano a 45° escrito en la línea siguiente a
+// `eti` tras un `mantAngulo`) ahora se dibujan: marco de la hoja, que gira con ella (diseño.md §13.7).
 // v32: la placa de una bisagra de apertura derecha se apoya en la cara interior del lateral (antes quedaba dentro del lateral y
 // asomaba al frente); un contorno de encimera `CPT` sin sólido no se dibuja cuando la encimera ya se reconstruye desde los almacenes
 // de los muebles (salía una mesada doble). El visor deja de listar los módulos de decoración y equipamiento (diseño.md §13.7).
@@ -19,7 +21,7 @@ type Vec3 = [number, number, number];
 // Tandembox desplazados); falta de un lateral de cajón (ver diseño.md §13.7).
 // v30: cocinas (catálogo 3): encimera reconstruida cuando el .3d la trae vacía, catálogo de cada pieza
 // siempre explícito si difiere del de su mueble, animaciones sin piezas descartadas (diseño.md §13.7).
-export const PARSER_VERSION = 32;
+export const PARSER_VERSION = 33;
 
 export interface CajaEscena {
   /** idEscena del módulo al que pertenece (null = no asociada). */
@@ -248,7 +250,7 @@ const NODOS_IGNORADOS = new Set(["mecanizado", "label", "defespigameca", "objpat
 
 const ATTR = /^(eti"|mat"|color\()/;
 const PRIM = /\b(taulerv|taulerh|taulerf|extrudeSp|extrude|tubeSp|tube|revolSp|revol|faceset|face|poly)(\(.*)$/;
-const PRIM_LINEA = /^(taulerv|taulerh|taulerf|extrudeSp|extrude|tubeSp|tube|revolSp|revol)\(/;
+const PRIM_LINEA = /^(?:mantAngulo\s+)*(taulerv|taulerh|taulerf|extrudeSp|extrude|tubeSp|tube|revolSp|revol)\(/;
 
 /** Recorre los grupos `(...)` de una línea a partir de `desde`, sin armar arreglos intermedios. */
 function recorrerGrupos(s: string, desde: number, cb: (g: string) => void) {
@@ -437,6 +439,39 @@ function prismaDeContorno(P: Vec3[], esp: number, sinTapa = false): { v: number[
 }
 
 /**
+ * Perfil de aluminio con inglete (marcos de puertas de vidrio): el contorno (sección del perfil) está escrito sobre el plano del corte a
+ * 45° (x = y o x + y = c) y el perfil se extruye a lo largo de X con el largo `largo` (medida L del objeto): el extremo izquierdo es el
+ * corte dado (x = p.x) y el derecho el simétrico (x = largo - p.x). La sección es (y, z). null si el contorno no tiene esa forma.
+ */
+function prismaDeInglete(Q: Vec3[], largo: number): { v: number[]; i: number[] } | null {
+  if (!(largo > 0.5) || Q.length < 4) return null;
+  const dif = Q.map((q) => q[0] - q[1]);
+  const sum = Q.map((q) => q[0] + q[1]);
+  const rango = (a: number[]) => Math.max(...a) - Math.min(...a);
+  if (rango(dif) > 1e-3 && rango(sum) > 1e-3) return null;
+  const pts = Q.length > 3 && Q[0].every((x, j) => Math.abs(x - Q[Q.length - 1][j]) < 1e-6) ? Q.slice(0, -1) : Q;
+  if (pts.length < 3) return null;
+  const flat: number[] = [];
+  for (const p of pts) flat.push(p[1], p[2]);
+  const tri = earcut(flat);
+  if (tri.length < 3) return null;
+  const n = pts.length;
+  const v: number[] = [];
+  for (const p of pts) v.push(p[0], p[1], p[2]);
+  for (const p of pts) v.push(largo - p[0], p[1], p[2]);
+  const idx: number[] = [];
+  for (let k = 0; k < tri.length; k += 3) {
+    idx.push(tri[k], tri[k + 1], tri[k + 2]);
+    idx.push(n + tri[k], n + tri[k + 2], n + tri[k + 1]);
+  }
+  for (let k = 0; k < n; k++) {
+    const k2 = (k + 1) % n;
+    idx.push(k, k2, n + k, k2, n + k2, n + k);
+  }
+  return { v, i: idx };
+}
+
+/**
  * `extrude`/`extrudeSp` con un contorno plano que no es un rectángulo alineado (marcos de abertura, bordes de
  * bacha, perfiles con relieve) → prisma exacto en el sistema del objeto. null: se dibuja como caja.
  */
@@ -464,6 +499,18 @@ function prismaDePrimitiva(
     }
   }
   const planos = [0, 1, 2].filter((k) => max[k] - min[k] < 1e-6);
+  if (planos.length === 0) {
+    const pi = prismaDeInglete(Q, size[0]);
+    if (!pi) return null;
+    const Ri = pr.ang ? rotacion(...(pr.ang.slice(0, 3).map((x) => ev(x, env) ?? 0) as [number, number, number])) : ID3;
+    for (let k = 0; k < pi.v.length; k += 3) {
+      const q = apply(Ri, [pi.v[k], pi.v[k + 1], pi.v[k + 2]]);
+      pi.v[k] = q[0] + off[0];
+      pi.v[k + 1] = q[1] + off[1];
+      pi.v[k + 2] = q[2] + off[2];
+    }
+    return pi;
+  }
   if (planos.length !== 1) return null;
   const eje = planos[0];
   const [a, b] = [0, 1, 2].filter((k) => k !== eje);
