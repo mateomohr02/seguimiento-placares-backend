@@ -11,6 +11,8 @@ import { evaluar, grupos, oculto, type Entorno } from "./expresion";
 // base, así se puede re-interpretar).
 type Vec3 = [number, number, number];
 
+// v34: se descarta el `encim.` propio de un mueble que flota más de 50 mm sobre el tope de su cuerpo (guardado dentro de la carcasa
+// IZ queda Hz más alto; TeoWin no lo muestra): aparecía como un estante de granito dentro de un armario alto apoyado sobre el bajo.
 // v33: los perfiles de aluminio con inglete de las puertas de vidrio (familia PER, `extrude` en un plano a 45° escrito en la línea siguiente a
 // `eti` tras un `mantAngulo`) ahora se dibujan: marco de la hoja, que gira con ella (diseño.md §13.7).
 // v32: la placa de una bisagra de apertura derecha se apoya en la cara interior del lateral (antes quedaba dentro del lateral y
@@ -21,7 +23,7 @@ type Vec3 = [number, number, number];
 // Tandembox desplazados); falta de un lateral de cajón (ver diseño.md §13.7).
 // v30: cocinas (catálogo 3): encimera reconstruida cuando el .3d la trae vacía, catálogo de cada pieza
 // siempre explícito si difiere del de su mueble, animaciones sin piezas descartadas (diseño.md §13.7).
-export const PARSER_VERSION = 33;
+export const PARSER_VERSION = 34;
 
 export interface CajaEscena {
   /** idEscena del módulo al que pertenece (null = no asociada). */
@@ -986,6 +988,8 @@ export function interpretarEscena3D(texto: string, opciones: OpcionesInterprete 
   /** El mueble que se está recorriendo ya trae su encimera a la vista (no se repite la del almacén). */
   let moduloConEncimera = false;
   const reconDibujadas = new Set<string>();
+  /** Trozos de encimera propios de un mueble (`encim.`), para descartar los que flotan sobre su cuerpo (ver el final). */
+  const encimasModulo: CajaEscena[] = [];
 
   const caminar = (
     n: Nodo,
@@ -1350,6 +1354,7 @@ export function interpretarEscena3D(texto: string, opciones: OpcionesInterprete 
         };
         out.cajas.push(cajaNueva);
         if (recon !== null) cajasRecon.push(cajaNueva);
+        if (n.objeti === "EN" && id !== null && cat === catDeModulo.get(id)) encimasModulo.push(cajaNueva);
       }
     }
     if (enModulo && recon === null && n.camino.length >= 3 && !tieneGeometria(n) && (n.objeti === "SWL" || n.objeti === "EN" || n.objeti === "CPT")) {
@@ -1473,6 +1478,38 @@ export function interpretarEscena3D(texto: string, opciones: OpcionesInterprete 
       if (total > 0 && cubierto / total >= 0.9) cubiertas.add(malla);
     }
     if (cubiertas.size > 0) out.mallas = out.mallas.filter((m) => !cubiertas.has(m));
+  }
+  // Encimera propia de un mueble que no apoya sobre él: el `encim.` de un mueble va a `H+Hz` sobre el origen del mueble (tapa del
+  // cuerpo); cuando el .3d lo guarda dentro de la carcasa `IZ` (cuyo origen ya está a `Hz` del piso) queda `Hz` (150 mm) más alto,
+  // flotando sobre el mueble (y, si hay un armario alto encima, dentro de su hueco como un estante). TeoWin no lo muestra. Una
+  // encimera apoyada tiene su cara inferior a la altura del tope del cuerpo del mueble; se descarta si queda más de 50 mm sobre él.
+  if (encimasModulo.length > 0) {
+    const tope = new Map<number, number>();
+    const subir = (mod: number | null, r: number[], t: Vec3, pts: Iterable<Vec3>) => {
+      if (mod === null) return;
+      let y = tope.get(mod) ?? -Infinity;
+      for (const [x, yy, z] of pts) y = Math.max(y, t[1] + r[3] * x + r[4] * yy + r[5] * z);
+      tope.set(mod, y);
+    };
+    const esquinas = function* (s: Vec3): Generator<Vec3> {
+      for (const x of [0, s[0]]) for (const y of [0, s[1]]) for (const z of [0, s[2]]) yield [x, y, z];
+    };
+    const conjunto = new Set(encimasModulo);
+    for (const c of out.cajas) if (!conjunto.has(c)) subir(c.mod, c.r, c.t, esquinas(c.s));
+    for (const q of out.mallas) {
+      const pts: Vec3[] = [];
+      for (let k = 0; k + 2 < q.v.length; k += 3) pts.push([q.v[k], q.v[k + 1], q.v[k + 2]]);
+      subir(q.mod, q.r, q.t, pts);
+    }
+    const flotan = new Set<CajaEscena>();
+    for (const c of encimasModulo) {
+      const t = tope.get(c.mod ?? -1);
+      if (t === undefined) continue;
+      let base = Infinity;
+      for (const [x, y, z] of esquinas(c.s)) base = Math.min(base, c.t[1] + c.r[3] * x + c.r[4] * y + c.r[5] * z);
+      if (base > t + 50) flotan.add(c);
+    }
+    if (flotan.size > 0) out.cajas = out.cajas.filter((c) => !flotan.has(c));
   }
   // Una animación sin ninguna pieza (la hoja o el cajón se omitieron: invisibles o sin medida) no abre nada: se descarta
   // para que el visor no ofrezca un botón que no mueve nada.
