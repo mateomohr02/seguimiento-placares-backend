@@ -11,6 +11,8 @@ import { evaluar, grupos, oculto, type Entorno } from "./expresion";
 // base, así se puede re-interpretar).
 type Vec3 = [number, number, number];
 
+// v36: un frente abatible (pistón a gas `ABAT*`) gira sobre su borde superior (o inferior) con un eje paralelo al ancho del mueble: lo dicen sus
+// bisagras de cuerpo, que llevan `ang(180,0,±90)` (el lado largo de la bisagra, el del eje, queda horizontal); antes siempre giraba sobre un eje vertical.
 // v35: un frente `extraible` con herrajes de alambre (cestos `seabre` + `AsiEsAbierto`, familia ACM bajo un `AIP3D`) se anima como un solo
 // cajón: el frente, los rieles y los cestos salen juntos (antes cada cesto corría solo 425 mm y el frente quedaba cerrado). El recorrido es
 // AsiEsAbierto − AsiEsCerrado del cesto (diseño.md §16.4).
@@ -26,7 +28,7 @@ type Vec3 = [number, number, number];
 // Tandembox desplazados); falta de un lateral de cajón (ver diseño.md §13.7).
 // v30: cocinas (catálogo 3): encimera reconstruida cuando el .3d la trae vacía, catálogo de cada pieza
 // siempre explícito si difiere del de su mueble, animaciones sin piezas descartadas (diseño.md §13.7).
-export const PARSER_VERSION = 35;
+export const PARSER_VERSION = 36;
 
 export interface CajaEscena {
   /** idEscena del módulo al que pertenece (null = no asociada). */
@@ -871,12 +873,17 @@ const ESPESOR_DEFECTO = 18;
 const CAT_DEFECTO = "4";
 
 /**
- * Centro (x local de la hoja) de las bisagras de cuerpo que cuelgan de una hoja con bisagra, o null si no tiene (puertas de
- * otros catálogos, bisagras que no son del tipo clásico). Una bisagra izquierda se coloca en `virtual(40.4,…) ang(0,180,0)` y una
- * derecha en `virtual(L-pl,…) ang(180,0,0)`: el cuerpo (37,4 mm de ancho) siempre queda hacia el interior de la hoja.
+ * Bisagras de cuerpo (40,4 mm de ancho) que cuelgan de una hoja con bisagra: centro (x, y locales de la hoja) y orientación del eje de
+ * giro, o null si no tiene (puertas de otros catálogos, bisagras que no son del tipo clásico). Una bisagra izquierda se coloca en
+ * `virtual(40.4,…) ang(0,180,0)` y una derecha en `virtual(L-pl,…) ang(180,0,0)`: el cuerpo (37,4 mm de ancho) siempre queda hacia el
+ * interior de la hoja y su lado largo (66 mm, Y local) corre a lo largo del eje de la bisagra. Un frente abatible (hacia arriba o hacia
+ * abajo, con pistón a gas) lleva las bisagras giradas `ang(180,0,±90)`: ese lado largo queda horizontal, o sea el eje es paralelo al
+ * ancho de la hoja (`horizontal`).
  */
-function centroBisagras(hoja: Nodo, env: Entorno): number | null {
+function bisagrasHoja(hoja: Nodo, env: Entorno): { x: number; y: number; horizontal: boolean } | null {
   const xs: number[] = [];
+  const ys: number[] = [];
+  let horiz = 0;
   const e: Entorno = { ...env };
   const rec = (k: Nodo) => {
     for (const h of k.kids) {
@@ -885,14 +892,20 @@ function centroBisagras(hoja: Nodo, env: Entorno): number | null {
         const s = h.virtual[1]?.slice(0, 3).map((x) => evaluar(x, e));
         if (p && s && !p.includes(null) && s[0] !== null && Math.abs(s[0] - 40.4) < 0.1) {
           const a = (h.ang ?? []).slice(0, 3).map((x) => evaluar(x, e) ?? 0);
-          const d = apply(rotacion(a[0] ?? 0, a[1] ?? 0, a[2] ?? 0), [20.2, 0, 0]);
+          const R = rotacion(a[0] ?? 0, a[1] ?? 0, a[2] ?? 0);
+          const d = apply(R, [20.2, 0, 0]);
+          const largo = apply(R, [0, 1, 0]);
           xs.push((p[0] as number) + d[0]);
+          ys.push((p[1] as number) + d[1]);
+          if (Math.abs(largo[0]) > Math.abs(largo[1])) horiz++;
         }
       } else if (!h.hinge) rec(h);
     }
   };
   rec(hoja);
-  return xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null;
+  if (!xs.length) return null;
+  const prom = (v: number[]) => v.reduce((a, b) => a + b, 0) / v.length;
+  return { x: prom(xs), y: prom(ys), horizontal: horiz * 2 > xs.length };
 }
 
 /** Opciones del intérprete: `biblioteca` devuelve el texto del `.3d` de un objeto de la biblioteca de TeoWin. */
@@ -1166,7 +1179,8 @@ export function interpretarEscena3D(texto: string, opciones: OpcionesInterprete 
         const xb = xPar(pB);
         // El lado de la bisagra lo dicen las bisagras que cuelgan de la hoja (TeoWin las dibuja ahí): una hoja de ancho completo
         // de un mueble de una sola puerta tiene su centro justo en el medio y la posición no alcanza (`apertura 2` = bisagra a la derecha).
-        const cb = centroBisagras(n, env);
+        const bis = bisagrasHoja(n, env);
+        const cb = bis ? bis.x : null;
         let izquierda: boolean;
         let bisagra: Vec3;
         if (cb !== null) {
@@ -1176,15 +1190,34 @@ export function interpretarEscena3D(texto: string, opciones: OpcionesInterprete 
           izquierda = (xa + xb) / 2 <= mk.L / 2 + 1;
           bisagra = izquierda ? (xa <= xb ? pA : pB) : xa >= xb ? pA : pB;
         }
-        const eje = apply(mk.M, [0, 1, 0]);
         const grados = n.anguloAper * (buscarPorcen(n) ?? 0.85);
-        out.animaciones.push({
-          tipo: "giro",
-          mod: id,
-          eje: [r4(eje[0]), r4(eje[1]), r4(eje[2])],
-          pivote: rv(bisagra),
-          dist: r1(izquierda ? -grados : grados),
-        });
+        if (bis !== null && bis.horizontal) {
+          // Frente abatible (pistón a gas): bisagras en el borde superior (o inferior) con el eje paralelo al ancho de la hoja. Gira sobre
+          // ese borde hacia el frente del mueble (+Z); el sentido sale de la velocidad del centro de la hoja (eje × radio).
+          const eje = apply(M2, [1, 0, 0]);
+          const borde = apply(M2, [0, bis.y >= env.H / 2 ? env.H : 0, 0]);
+          const centro = apply(M2, [env.L / 2, env.H / 2, 0]);
+          const rad = [centro[0] - borde[0], centro[1] - borde[1], centro[2] - borde[2]];
+          const fr = apply(mk.M, [0, 0, 1]);
+          const vel = [eje[1] * rad[2] - eje[2] * rad[1], eje[2] * rad[0] - eje[0] * rad[2], eje[0] * rad[1] - eje[1] * rad[0]];
+          const sentido = vel[0] * fr[0] + vel[1] * fr[1] + vel[2] * fr[2] >= 0 ? 1 : -1;
+          out.animaciones.push({
+            tipo: "giro",
+            mod: id,
+            eje: [r4(eje[0]), r4(eje[1]), r4(eje[2])],
+            pivote: rv([T2[0] + borde[0], T2[1] + borde[1], T2[2] + borde[2]]),
+            dist: r1(sentido * grados),
+          });
+        } else {
+          const eje = apply(mk.M, [0, 1, 0]);
+          out.animaciones.push({
+            tipo: "giro",
+            mod: id,
+            eje: [r4(eje[0]), r4(eje[1]), r4(eje[2])],
+            pivote: rv(bisagra),
+            dist: r1(izquierda ? -grados : grados),
+          });
+        }
         anim = out.animaciones.length - 1;
       } else if (n.seAbre && !enCorr && env.P > 0) {
         const e = apply(M, [0, 0, 1]);
