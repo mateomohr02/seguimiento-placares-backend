@@ -11,6 +11,9 @@ import { evaluar, grupos, oculto, type Entorno } from "./expresion";
 // base, así se puede re-interpretar).
 type Vec3 = [number, number, number];
 
+// v37: las cajas de las bisagras de un frente abatible (`ang(180,0,±90)` el cuerpo, `ang(90,0,-90)` la placa) se orientan con el orden de giro
+// de TeoWin para los herrajes (X, luego Y, luego Z; `rotacionHerraje`): el cuerpo queda pegado al canto de la hoja (y acompaña su giro) y la placa
+// cuelga del panel superior del hueco (antes: cuerpo 40 mm adentro del canto y placa parada sobre el techo, asomando por encima del mueble).
 // v36: un frente abatible (pistón a gas `ABAT*`) gira sobre su borde superior (o inferior) con un eje paralelo al ancho del mueble: lo dicen sus
 // bisagras de cuerpo, que llevan `ang(180,0,±90)` (el lado largo de la bisagra, el del eje, queda horizontal); antes siempre giraba sobre un eje vertical.
 // v35: un frente `extraible` con herrajes de alambre (cestos `seabre` + `AsiEsAbierto`, familia ACM bajo un `AIP3D`) se anima como un solo
@@ -28,7 +31,7 @@ type Vec3 = [number, number, number];
 // Tandembox desplazados); falta de un lateral de cajón (ver diseño.md §13.7).
 // v30: cocinas (catálogo 3): encimera reconstruida cuando el .3d la trae vacía, catálogo de cada pieza
 // siempre explícito si difiere del de su mueble, animaciones sin piezas descartadas (diseño.md §13.7).
-export const PARSER_VERSION = 36;
+export const PARSER_VERSION = 37;
 
 export interface CajaEscena {
   /** idEscena del módulo al que pertenece (null = no asociada). */
@@ -728,6 +731,19 @@ function rotacion(ax: number, ay: number, az: number): Mat3 {
   const rz = [cz, -sz, 0, sz, cz, 0, 0, 0, 1];
   return mul(rz, mul(ry, rx));
 }
+/**
+ * Rotación de un herraje (`hinge`): TeoWin compone sus ángulos en el orden inverso al de las piezas (Rx·Ry·Rz, no Rz·Ry·Rx). Solo importa con
+ * dos ejes a la vez: la placa de bisagra derecha `ang(180,-90,0)` (apoyada en el lateral, sin el giro de 180° de la v32) y las de un frente
+ * abatible, `ang(180,0,±90)` el cuerpo (pegado al canto de la hoja) y `ang(90,0,-90)` la placa (colgada del panel superior).
+ */
+function rotacionHerraje(ax: number, ay: number, az: number): Mat3 {
+  const c = (g: number) => Math.cos((g * Math.PI) / 180);
+  const s = (g: number) => Math.sin((g * Math.PI) / 180);
+  const rx = [1, 0, 0, 0, c(ax), -s(ax), 0, s(ax), c(ax)];
+  const ry = [c(ay), 0, s(ay), 0, 1, 0, -s(ay), 0, c(ay)];
+  const rz = [c(az), -s(az), 0, s(az), c(az), 0, 0, 0, 1];
+  return mul(rx, mul(ry, rz));
+}
 const r1 = (n: number) => Math.round(n * 10) / 10;
 const r4 = (n: number) => Math.round(n * 1e4) / 1e4;
 const rv = (v: Vec3): Vec3 => [r1(v[0]), r1(v[1]), r1(v[2])];
@@ -892,7 +908,7 @@ function bisagrasHoja(hoja: Nodo, env: Entorno): { x: number; y: number; horizon
         const s = h.virtual[1]?.slice(0, 3).map((x) => evaluar(x, e));
         if (p && s && !p.includes(null) && s[0] !== null && Math.abs(s[0] - 40.4) < 0.1) {
           const a = (h.ang ?? []).slice(0, 3).map((x) => evaluar(x, e) ?? 0);
-          const R = rotacion(a[0] ?? 0, a[1] ?? 0, a[2] ?? 0);
+          const R = rotacionHerraje(a[0] ?? 0, a[1] ?? 0, a[2] ?? 0);
           const d = apply(R, [20.2, 0, 0]);
           const largo = apply(R, [0, 1, 0]);
           xs.push((p[0] as number) + d[0]);
@@ -1248,12 +1264,16 @@ export function interpretarEscena3D(texto: string, opciones: OpcionesInterprete 
       // izquierdo) el grosor de la placa (+Z local) entra al mueble; con `ang(180,-90,0)` (lateral derecho) el marco queda
       // espejado y la placa entraba en el lateral y asomaba al frente: se gira 180° sobre su eje vertical.
       let Rh = M2;
+      if (n.ang) {
+        const a = n.ang.slice(0, 3).map((x) => ev(x, env) ?? 0);
+        Rh = mul(M, rotacionHerraje(a[0], a[1], a[2]));
+      }
       if (partes === HERRAJE_PLACA && marco) {
         const ex = apply(marco.M, [1, 0, 0]);
         const xl = (T2[0] - marco.T[0]) * ex[0] + (T2[1] - marco.T[1]) * ex[1] + (T2[2] - marco.T[2]) * ex[2];
         const adentro: Vec3 = xl < marco.L / 2 ? ex : [-ex[0], -ex[1], -ex[2]];
-        const z = apply(M2, [0, 0, 1]);
-        if (z[0] * adentro[0] + z[1] * adentro[1] + z[2] * adentro[2] < 0) Rh = mul(M2, rotacion(0, 180, 0));
+        const z = apply(Rh, [0, 0, 1]);
+        if (z[0] * adentro[0] + z[1] * adentro[1] + z[2] * adentro[2] < -0.5) Rh = mul(Rh, rotacion(0, 180, 0));
       }
       for (const [off, dim] of partes ?? []) {
         const o = apply(Rh, off);
