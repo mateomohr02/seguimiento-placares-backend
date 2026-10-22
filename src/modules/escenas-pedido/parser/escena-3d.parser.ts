@@ -11,6 +11,9 @@ import { evaluar, grupos, oculto, type Entorno } from "./expresion";
 // base, así se puede re-interpretar).
 type Vec3 = [number, number, number];
 
+// v35: un frente `extraible` con herrajes de alambre (cestos `seabre` + `AsiEsAbierto`, familia ACM bajo un `AIP3D`) se anima como un solo
+// cajón: el frente, los rieles y los cestos salen juntos (antes cada cesto corría solo 425 mm y el frente quedaba cerrado). El recorrido es
+// AsiEsAbierto − AsiEsCerrado del cesto (diseño.md §16.4).
 // v34: se descarta el `encim.` propio de un mueble que flota más de 50 mm sobre el tope de su cuerpo (guardado dentro de la carcasa
 // IZ queda Hz más alto; TeoWin no lo muestra): aparecía como un estante de granito dentro de un armario alto apoyado sobre el bajo.
 // v33: los perfiles de aluminio con inglete de las puertas de vidrio (familia PER, `extrude` en un plano a 45° escrito en la línea siguiente a
@@ -23,7 +26,7 @@ type Vec3 = [number, number, number];
 // Tandembox desplazados); falta de un lateral de cajón (ver diseño.md §13.7).
 // v30: cocinas (catálogo 3): encimera reconstruida cuando el .3d la trae vacía, catálogo de cada pieza
 // siempre explícito si difiere del de su mueble, animaciones sin piezas descartadas (diseño.md §13.7).
-export const PARSER_VERSION = 34;
+export const PARSER_VERSION = 35;
 
 export interface CajaEscena {
   /** idEscena del módulo al que pertenece (null = no asociada). */
@@ -191,6 +194,11 @@ class Nodo {
   invisibilidad: string | null = null;
   /** Marca `seabre`: cajón que se desliza hacia el frente. */
   seAbre = false;
+  /** Marca `extraible`: frente solidario con el herraje interior (cestos, rieles) que sale con él. */
+  extraible = false;
+  /** `AsiEsAbierto(x,y,z)` / `AsiEsCerrado(x,y,z)`: posición del nodo (en el sistema de su padre) abierto y cerrado; "_" = no cambia. */
+  asiAbierto: string[] | null = null;
+  asiCerrado: string[] | null = null;
   /** Marca `corredera`: hoja de puerta corrediza. */
   corredera = false;
   /** anguloAper(n): puerta con bisagra, ángulo máximo de apertura en grados. */
@@ -589,6 +597,7 @@ function parsearArbol(texto: string): Nodo {
     if (!t.startsWith("eti")) {
       if (/\bseabre\b/.test(t)) o.seAbre = true;
       if (/\bcorredera\b/.test(t)) o.corredera = true;
+      if (/\bextraible\b/.test(t) && !t.startsWith("observaciones")) o.extraible = true;
       if (/\besAtrezzo\b/.test(t)) o.atrezzo = true;
       if (/\bopened\b/.test(t)) o.abierto = true;
       if (/\besBiblioteca\b/.test(t)) o.biblioteca = true;
@@ -607,6 +616,8 @@ function parsearArbol(texto: string): Nodo {
     else if ((m = /^use (\w+)\s*=(.*)$/.exec(t))) o.use[m[1]] = m[2].trim();
     else if ((m = /^param (\w+)\s*=\s*"(.*)"/.exec(t))) o.param[m[1]] = m[2];
     else if (t.startsWith("virtual(")) o.virtual = grupos(t).slice(0, 2);
+    else if (t.startsWith("AsiEsAbierto(")) o.asiAbierto = grupos(t)[0] ?? null;
+    else if (t.startsWith("AsiEsCerrado(")) o.asiCerrado = grupos(t)[0] ?? null;
     else if (t.startsWith("ang(")) o.ang = grupos(t)[0] ?? null;
     else if (t.startsWith("pos(")) {
       // Un `pos(...)` que sigue a las líneas `malla`/`caras` es la posición de la malla dentro del objeto (casi siempre 0,0,0):
@@ -815,6 +826,11 @@ function tieneGeometria(n: Nodo): boolean {
   return n.prims.length > 0 || n.meshes.length > 0 || n.kids.some(tieneGeometria);
 }
 
+/** ¿Cuelga del nodo (visible) un herraje que se abre por su `AsiEsAbierto` (cesto, extraíble)? */
+function tieneHerrajeAbierto(n: Nodo): boolean {
+  return n.kids.some((k) => !k.nuncaVisible && ((k.seAbre && k.asiAbierto !== null) || tieneHerrajeAbierto(k)));
+}
+
 function buscarNodo(n: Nodo, nombre: string): Nodo | null {
   for (const k of n.kids) {
     if (k.nombre === nombre) return k;
@@ -991,6 +1007,9 @@ export function interpretarEscena3D(texto: string, opciones: OpcionesInterprete 
   /** Trozos de encimera propios de un mueble (`encim.`), para descartar los que flotan sobre su cuerpo (ver el final). */
   const encimasModulo: CajaEscena[] = [];
 
+  /** Animaciones de frentes `extraible` (índice → ya se fijó su recorrido con el cesto). */
+  const extraibles = new Map<number, boolean>();
+
   const caminar = (
     n: Nodo,
     envPadre: Entorno,
@@ -1099,7 +1118,34 @@ export function interpretarEscena3D(texto: string, opciones: OpcionesInterprete 
     const sinAnim = SIN_ANIMACION.has(cat);
     let anim = sinAnim || recon !== null ? null : animPadre;
     if (enModulo && !sinAnim && recon === null) {
-      if (n.seAbre && enCorr && envPadre.L !== undefined && env.L !== undefined && envPadre.L - env.L >= 1) {
+      if (n.extraible && !enCorr && tieneHerrajeAbierto(n)) {
+        // Frente `extraible` con herraje de alambre (cestos, rieles): TeoWin lo saca como un solo cajón. El frente y todo lo que cuelga de
+        // él comparten esta animación; el recorrido sale del primer cesto que trae `AsiEsAbierto` (ver el caso siguiente).
+        const e = apply(M, [0, 0, 1]);
+        out.animaciones.push({ tipo: "cajon", mod: id, eje: [r4(e[0]), r4(e[1]), r4(e[2])], dist: 0 });
+        anim = out.animaciones.length - 1;
+        extraibles.set(anim, false);
+      } else if (n.seAbre && animPadre !== null && extraibles.has(animPadre)) {
+        // Cesto (u otra pieza `seabre`) dentro de un frente extraible: no se anima por su cuenta, sale con el frente. Su `AsiEsAbierto`
+        // (posición abierta, en el sistema del padre; "_" = no cambia) menos `AsiEsCerrado` (o su propia posición) es el recorrido.
+        if (!extraibles.get(animPadre)) {
+          extraibles.set(animPadre, true);
+          const comp = (g: string[] | null, k: number) => (g && g[k] && g[k] !== "_" ? ev(g[k], envPadre) : null);
+          const d: Vec3 = [0, 0, 0];
+          for (let k = 0; k < 3; k++) {
+            const a = comp(n.asiAbierto, k);
+            if (a !== null) d[k] = a - (comp(n.asiCerrado, k) ?? pos[k]);
+          }
+          const largo = Math.hypot(d[0], d[1], d[2]);
+          const dir: Vec3 = largo > 1 ? [d[0] / largo, d[1] / largo, d[2] / largo] : [0, 0, 1];
+          const e = apply(M, dir);
+          out.animaciones[animPadre] = {
+            ...out.animaciones[animPadre],
+            eje: [r4(e[0]), r4(e[1]), r4(e[2])],
+            dist: r1(largo > 1 ? largo : (n.porcen ?? 0.85) * (env.P > 0 ? env.P : 0)),
+          };
+        }
+      } else if (n.seAbre && enCorr && envPadre.L !== undefined && env.L !== undefined && envPadre.L - env.L >= 1) {
         // Hoja de una puerta de paso corrediza: corre en el plano de la puerta (X), no hacia el frente.
         const sentido = pos[0] + env.L / 2 < envPadre.L / 2 ? 1 : -1;
         const e = apply(M, [sentido, 0, 0]);
