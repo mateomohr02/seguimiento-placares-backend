@@ -8,6 +8,7 @@ import {
 } from "../../sync/teowin-orden.queries";
 import { agruparDespiece } from "../../sync/agrupar-despiece";
 import { lineaDeModulo } from "../../sync/linea-producto";
+import { cargarPartidasDeOrden, partidaDesdeRow } from "../../sync/partida";
 
 // diseño.md §5 / §3.6 — "Agregar orden": trae la cabecera y todas las
 // piezas de corte de la orden (placares y cocinas: catálogos 4 y 3) desde TeoWin (solo lectura) y las escribe
@@ -35,6 +36,9 @@ export async function syncOrdenFromTeowin(codigoOrdenFabricacion: number) {
   const modulosPorPedido = await Promise.all(
     codigosPedido.map((codigo) => fetchModulosDePedido(codigo)),
   );
+
+  // Partida de cada módulo (una consulta por orden; si falla, los módulos quedan sin partida y el sync sigue).
+  const partidas = await cargarPartidasDeOrden(codigoOrdenFabricacion);
 
   return prisma.$transaction(async (tx) => {
     const orden = await tx.orden.create({
@@ -89,6 +93,11 @@ export async function syncOrdenFromTeowin(codigoOrdenFabricacion: number) {
             estado: "PENDIENTE",
           },
         });
+
+        const partida = partidas.get(`${codigoPedido}|${moduloId}`);
+        if (partida) {
+          await tx.moduloPartida.create({ data: { modulo_id: modulo.id, ...partidaDesdeRow(partida) } });
+        }
 
         for (const grupo of gruposDeModulo) {
           const despieceTipo = await tx.despieceTipo.create({

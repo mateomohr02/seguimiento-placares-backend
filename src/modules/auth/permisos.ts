@@ -13,6 +13,8 @@ export const PERMISOS = {
   PLANILLAS_VER: "planillas.ver",
   PLANILLAS_INDICADORES: "planillas.indicadores",
   PLANILLAS_CONFIGURAR: "planillas.configurar",
+  /** Ver los importes de la partida de un módulo (variantes, precio, total): solo gestión. */
+  MODULOS_PRECIOS: "modulos.precios",
 } as const;
 
 export type Permiso = (typeof PERMISOS)[keyof typeof PERMISOS];

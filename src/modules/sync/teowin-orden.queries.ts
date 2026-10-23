@@ -4,6 +4,7 @@ import type {
   TeowinDespieceRow,
   TeowinModuloInfo,
   TeowinOrdenCabecera,
+  TeowinPartidaRow,
   TeowinPedidoInfo,
 } from "./teowin-orden.types";
 
@@ -154,5 +155,54 @@ export async function fetchModulosDePedido(codigoPedido: string): Promise<Teowin
      WHERE padre.presupuesto = @codigoPedido
        AND padre.codigoPadre = -1`,
     { codigoPedido },
+  );
+}
+
+// Partida de cada módulo de una orden: la fila de tpresupuestoLineas de la RAÍZ del despiece
+// (codigoPadre = -1; los hijos comparten lineaPresupuesto con su raíz y no tienen partida propia).
+// Una sola consulta por orden. Referencia = familia/articulo/color de la raíz (l.referencia viene vacío
+// en algunas partidas). Precio = l.precio (unitario); total = precio × cantidad. Capítulo: por patrón
+// (tArticuloCapituloPatron, si no tFamiliaCapituloPatron) dentro de los capítulos del presupuesto; si no
+// hay, el capítulo 0 («PARTIDAS SIN CAPÍTULO»). Solo SELECT.
+export async function fetchPartidasDeOrden(orden: number): Promise<TeowinPartidaRow[]> {
+  return teowinQuery<TeowinPartidaRow>(
+    `SELECT
+        ofab.codigoOrdenFabricacion AS orden_fabricacion,
+        d.presupuesto               AS pedido,
+        d.idEscena                  AS modulo_id,
+        d.lineaPresupuesto          AS partida_linea,
+        l.cantidad                  AS uds,
+        d.familia + '/' + d.articulo + '/' + d.color AS referencia,
+        CAST(l.descripcion AS varchar(max))          AS descripcion_partida,
+        CAST(l.descripcion3D AS varchar(200))        AS titulo_partida,
+        d.medida1 AS L, d.medida2 AS H, d.medida3 AS P,
+        l.precioVariantes           AS variantes,
+        l.precio                    AS precio_unitario,
+        l.precio * l.cantidad       AS total,
+        CAST(COALESCE(cap.descripcion, cap0.descripcion) AS varchar(255)) AS capitulo
+     FROM tOrdenesFabricacion ofab
+     JOIN tdespieceLineaPresupuesto d
+         ON d.presupuesto = ofab.codigoPresupuesto AND d.codigoPadre = -1
+     JOIN tpresupuestoLineas l
+         ON l.codigoPresupuesto = d.presupuesto AND l.codigo = d.lineaPresupuesto
+     OUTER APPLY (
+         SELECT TOP 1 f.codigo
+         FROM tArticuloCapituloPatron a
+         JOIN tFamiliaCapituloPatron f ON f.id = a.idFamiliaCapituloPatron
+         WHERE a.familia = d.familia AND a.articulo = d.articulo AND a.idCatalogo = d.idCatalogo
+     ) pa
+     OUTER APPLY (
+         SELECT TOP 1 f.codigo
+         FROM tFamiliaCapituloPatron f
+         WHERE f.familia = d.familia AND f.idCatalogo = d.idCatalogo
+         ORDER BY f.orden, f.id
+     ) pf
+     LEFT JOIN tCapitulos cap
+         ON cap.codPresupuesto = d.presupuesto AND cap.capituloPatron = COALESCE(pa.codigo, pf.codigo)
+     LEFT JOIN tCapitulos cap0
+         ON cap0.codPresupuesto = d.presupuesto AND cap0.codigo = 0
+     WHERE ofab.codigoOrdenFabricacion = @orden
+       AND d.idCatalogo IN (${CATALOGOS_SQL})`,
+    { orden },
   );
 }
