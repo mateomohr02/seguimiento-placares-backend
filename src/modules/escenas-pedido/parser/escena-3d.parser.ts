@@ -11,6 +11,9 @@ import { evaluar, grupos, oculto, type Entorno } from "./expresion";
 // base, así se puede re-interpretar).
 type Vec3 = [number, number, number];
 
+// v38: veta de los tableros tal cual TeoWin (campo `v` de la caja, ver CajaEscena): sale del tipo (`taulerh/v/f`), de `orient N` en la cabecera del
+// objeto y de la marca `texV` de la primitiva (veta alterna); y se descarta el trozo de encimera reconstruido que queda dentro de otro módulo
+// (≥ 40 % de su volumen sobre cajas de otros muebles: el piso de un módulo apoyado sobre el bajo, no una mesada).
 // v37: las cajas de las bisagras de un frente abatible (`ang(180,0,±90)` el cuerpo, `ang(90,0,-90)` la placa) se orientan con el orden de giro
 // de TeoWin para los herrajes (X, luego Y, luego Z; `rotacionHerraje`): el cuerpo queda pegado al canto de la hoja (y acompaña su giro) y la placa
 // cuelga del panel superior del hueco (antes: cuerpo 40 mm adentro del canto y placa parada sobre el techo, asomando por encima del mueble).
@@ -31,7 +34,7 @@ type Vec3 = [number, number, number];
 // Tandembox desplazados); falta de un lateral de cajón (ver diseño.md §13.7).
 // v30: cocinas (catálogo 3): encimera reconstruida cuando el .3d la trae vacía, catálogo de cada pieza
 // siempre explícito si difiere del de su mueble, animaciones sin piezas descartadas (diseño.md §13.7).
-export const PARSER_VERSION = 37;
+export const PARSER_VERSION = 38;
 
 export interface CajaEscena {
   /** idEscena del módulo al que pertenece (null = no asociada). */
@@ -54,6 +57,11 @@ export interface CajaEscena {
   k?: string;
   /** Foto de paisaje (`eti"PSJ"`): la imagen entera cubre la cara y se ve sin sombras. */
   p?: 1;
+  /**
+   * Veta del tablero: eje LOCAL de la caja a lo largo del cual corre (0 = L/x, 1 = H/y, 2 = P/z), según `orient`/`texV` de TeoWin.
+   * Falta = la textura se ve como siempre (escenas anteriores a v38, extrusiones, mesadas, zócalos y marcas no interpretadas).
+   */
+  v?: 0 | 1 | 2;
 }
 
 /** Grupo de piezas que se desplazan juntas: un cajón que se abre o una hoja corrediza. */
@@ -158,6 +166,8 @@ interface Primitiva {
   ang: string[] | null;
   /** Línea `eti""` (sin etiqueta): en una encimera es el hueco de la bacha o la hornalla, no se dibuja. */
   sinEti: boolean;
+  /** Marca `texV` (línea siguiente a la primitiva): veta alterna respecto de la de fábrica. */
+  texV: boolean;
   /** Etiqueta de la línea (`eti"PSJ"`): PSJ es la foto de paisaje que se ve a través de una abertura. */
   etiqueta: string;
 }
@@ -599,6 +609,8 @@ function parsearArbol(texto: string): Nodo {
     // `nuncavis3d` e `invisib` (ej. los tiradores de un armario sin tirador): TeoWin no dibuja la pieza.
     if (/\b(nuncavis3d|invisib)\b/.test(t) && !t.startsWith("eti")) o.nuncaVisible = true;
     if (/\balmacenCMB\b/.test(t) && !t.startsWith("eti")) o.almacen = true;
+    // texV suelto en la línea siguiente a la primitiva (idJq(1) idJqT"…"  texV, o tipoNucleo(0)texV en extrusiones): es de la última primitiva del objeto.
+    if (t.includes("texV") && !t.startsWith("eti") && o.prims.length > 0) o.prims[o.prims.length - 1].texV = true;
     if (!t.startsWith("eti")) {
       if (/\bseabre\b/.test(t)) o.seAbre = true;
       if (/\bcorredera\b/.test(t)) o.corredera = true;
@@ -681,6 +693,7 @@ function parsearArbol(texto: string): Nodo {
           ang: angPrim,
           sinEti: /(?:^|\s)eti""/.test(completa),
           etiqueta: /eti"([^"]*)"/.exec(completa)?.[1] ?? "",
+          texV: false,
         });
       }
     } else if (/^(malla|caras|texcoord)\(/.test(t)) {
@@ -787,6 +800,23 @@ function cajaDeExtrusion(
   // Espesor 0 en el .3d: depende del material del mueble (script del catálogo).
   dim[plano] = size[plano] > 0.5 ? size[plano] : ESPESOR_DEFECTO;
   return [[off[0] + min[0], off[1] + min[1], off[2] + min[2]], dim];
+}
+
+/**
+ * Veta de un tablero (`taulerh/v/f`) según TeoWin: `orient N` del objeto + marca `texV` de la primitiva.
+ * Códigos de `orient`: taulerf 4 normal / 1 alterno; taulerh 2 / 6; taulerv 3 / 5. `texV` manda (24 taulerh la traen con el `orient` en un padre).
+ * Veta normal: taulerh a lo ancho (L, 0); taulerv y taulerf vertical (H, 1 = lo que el visor ya hacía: se omite → null). Alterna: gira al otro eje
+ * del plano de la pieza: taulerh y taulerv → profundidad (P, 2); taulerf → ancho (L, 0). PENDIENTE de confirmar en TeoWin la dirección de la
+ * alterna de taulerh/taulerv (taulerf alterno confirmado: frentes de cajón BB2-00078_004). null = sin cambios (extrusiones, orient raros).
+ */
+function vetaDe(n: Nodo, pr: Primitiva): 0 | 1 | 2 | null {
+  const normal = pr.tipo === "taulerh" ? 2 : pr.tipo === "taulerv" ? 3 : pr.tipo === "taulerf" ? 4 : null;
+  const alterno = pr.tipo === "taulerh" ? 6 : pr.tipo === "taulerv" ? 5 : pr.tipo === "taulerf" ? 1 : null;
+  if (normal === null || alterno === null) return null;
+  const esAlterno = pr.texV || n.orient === alterno;
+  if (!esAlterno && n.orient !== null && n.orient !== normal) return null;
+  if (esAlterno) return pr.tipo === "taulerf" ? 0 : 2;
+  return pr.tipo === "taulerh" ? 0 : null;
 }
 
 // Un objeto de primer nivel es un mueble si es de un catálogo de fábrica (no del 1, general, ni del 641,
@@ -1450,6 +1480,9 @@ export function interpretarEscena3D(texto: string, opciones: OpcionesInterprete 
           ...(pr.opacidad !== null ? { o: pr.opacidad } : {}),
           ...(cat !== catDeModulo.get(id ?? -1) ? { k: cat } : {}),
           ...(pr.etiqueta === "PSJ" ? { p: 1 as const } : {}),
+          ...(vetaDe(n, pr) !== null && !(cat === "636" && n.objeti === "EN") && recon === null && n.objeti !== "ZC" && pr.m !== "enci" && pr.etiqueta !== "PSJ"
+            ? { v: vetaDe(n, pr) as 0 | 1 | 2 }
+            : {}),
         };
         out.cajas.push(cajaNueva);
         if (recon !== null) cajasRecon.push(cajaNueva);
@@ -1577,6 +1610,47 @@ export function interpretarEscena3D(texto: string, opciones: OpcionesInterprete 
       if (total > 0 && cubierto / total >= 0.9) cubiertas.add(malla);
     }
     if (cubiertas.size > 0) out.mallas = out.mallas.filter((m) => !cubiertas.has(m));
+  }
+  // Trozo de encimera reconstruido (almacén `almacenCMB`) que en realidad es el piso de otro módulo apoyado sobre el bajo: la losa de 30 mm
+  // lo tapa y se vería como mesada. Se descarta si el 40 % o más de su volumen cae dentro de cajas (AABB) de OTROS módulos que no son encimera.
+  // Riesgo: una mesada real con un módulo apoyado encima (estante o armario sobre la losa) podría superar el umbral y perderse.
+  if (cajasRecon.length > 0) {
+    const aabb = (c: CajaEscena): [Vec3, Vec3] => {
+      const lo: Vec3 = [Infinity, Infinity, Infinity];
+      const hi: Vec3 = [-Infinity, -Infinity, -Infinity];
+      for (const x of [0, c.s[0]]) {
+        for (const y of [0, c.s[1]]) {
+          for (const z of [0, c.s[2]]) {
+            for (let k = 0; k < 3; k++) {
+              const q = c.t[k] + c.r[k * 3] * x + c.r[k * 3 + 1] * y + c.r[k * 3 + 2] * z;
+              lo[k] = Math.min(lo[k], q);
+              hi[k] = Math.max(hi[k], q);
+            }
+          }
+        }
+      }
+      return [lo, hi];
+    };
+    const mesadas = new Set([...cajasRecon, ...encimasModulo]);
+    const otras = out.cajas.filter((c) => c.mod !== null && !mesadas.has(c) && c.k !== "636" && !cajasHerraje.has(c)).map((c) => ({ mod: c.mod, b: aabb(c) }));
+    const tapadas = new Set<CajaEscena>();
+    for (const c of cajasRecon) {
+      const [lo, hi] = aabb(c);
+      const cand = otras.filter((o) => o.mod !== c.mod && o.b[0].every((x, k) => x < hi[k]) && o.b[1].every((x, k) => x > lo[k]));
+      if (cand.length === 0) continue;
+      const N = 24;
+      let dentro = 0;
+      for (let i = 0; i < N; i++) {
+        for (let j = 0; j < N; j++) {
+          for (let l = 0; l < N; l++) {
+            const p = [lo[0] + ((hi[0] - lo[0]) * (i + 0.5)) / N, lo[1] + ((hi[1] - lo[1]) * (j + 0.5)) / N, lo[2] + ((hi[2] - lo[2]) * (l + 0.5)) / N];
+            if (cand.some((o) => p.every((x, k) => x >= o.b[0][k] && x <= o.b[1][k]))) dentro++;
+          }
+        }
+      }
+      if (dentro / (N * N * N) >= 0.4) tapadas.add(c);
+    }
+    if (tapadas.size > 0) out.cajas = out.cajas.filter((c) => !tapadas.has(c));
   }
   // Encimera propia de un mueble que no apoya sobre él: el `encim.` de un mueble va a `H+Hz` sobre el origen del mueble (tapa del
   // cuerpo); cuando el .3d lo guarda dentro de la carcasa `IZ` (cuyo origen ya está a `Hz` del piso) queda `Hz` (150 mm) más alto,
