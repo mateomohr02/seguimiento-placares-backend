@@ -11,6 +11,11 @@ import { evaluar, grupos, oculto, type Entorno } from "./expresion";
 // base, así se puede re-interpretar).
 type Vec3 = [number, number, number];
 
+// v39: (1) una hoja guardada ABIERTA (`opened` + `ang(0,±A,0)` con A ≈ `anguloAper`) se dibuja cerrada y la anima el giro de siempre (antes se dibujaba
+// abierta 110° y encima giraba: «abre hacia afuera»; y si su pos.x pasaba de 100 se tomaba por corredera y se desplazaba: placar 26-02502); (2) un
+// `taulerh` sin marca claramente más profundo que ancho (P > 1,1·L) lleva la veta a lo largo de la profundidad (techo 400×570 del módulo 42 de
+// 26-02502; un solo dato de TeoWin); (3) la losa de contorno sin sólido (`SWL`/`EN`/`CPT`) se marca del catálogo 636 para que la casilla «Mesada»
+// la oculte.
 // v38: veta de los tableros tal cual TeoWin (campo `v` de la caja, ver CajaEscena): sale del tipo (`taulerh/v/f`), de `orient N` en la cabecera del
 // objeto y de la marca `texV` de la primitiva (veta alterna); y se descarta el trozo de encimera reconstruido que queda dentro de otro módulo
 // (≥ 40 % de su volumen sobre cajas de otros muebles: el piso de un módulo apoyado sobre el bajo, no una mesada).
@@ -34,7 +39,7 @@ type Vec3 = [number, number, number];
 // Tandembox desplazados); falta de un lateral de cajón (ver diseño.md §13.7).
 // v30: cocinas (catálogo 3): encimera reconstruida cuando el .3d la trae vacía, catálogo de cada pieza
 // siempre explícito si difiere del de su mueble, animaciones sin piezas descartadas (diseño.md §13.7).
-export const PARSER_VERSION = 38;
+export const PARSER_VERSION = 39;
 
 export interface CajaEscena {
   /** idEscena del módulo al que pertenece (null = no asociada). */
@@ -808,15 +813,19 @@ function cajaDeExtrusion(
  * Veta normal: taulerh a lo ancho (L, 0); taulerv y taulerf vertical (H, 1 = lo que el visor ya hacía: se omite → null). Alterna: gira al otro eje
  * del plano de la pieza: taulerh y taulerv → profundidad (P, 2); taulerf → ancho (L, 0). PENDIENTE de confirmar en TeoWin la dirección de la
  * alterna de taulerh/taulerv (taulerf alterno confirmado: frentes de cajón BB2-00078_004). null = sin cambios (extrusiones, orient raros).
+ * Un taulerh SIN marca (tablero horizontal: su espesor H es la medida menor) corre a lo largo del lado más largo de su plano: a lo ancho (L) si es
+ * más ancho que profundo o casi cuadrado (< 10 %), y a lo largo de la profundidad (P) si es claramente más profundo que ancho (techo 400×570 del
+ * módulo 42 de 26-02502, visto en TeoWin). Con marca (alterna) y en taulerv/taulerf el tamaño no cuenta.
  */
-function vetaDe(n: Nodo, pr: Primitiva): 0 | 1 | 2 | null {
+function vetaDe(n: Nodo, pr: Primitiva, dim: Vec3): 0 | 1 | 2 | null {
   const normal = pr.tipo === "taulerh" ? 2 : pr.tipo === "taulerv" ? 3 : pr.tipo === "taulerf" ? 4 : null;
   const alterno = pr.tipo === "taulerh" ? 6 : pr.tipo === "taulerv" ? 5 : pr.tipo === "taulerf" ? 1 : null;
   if (normal === null || alterno === null) return null;
   const esAlterno = pr.texV || n.orient === alterno;
   if (!esAlterno && n.orient !== null && n.orient !== normal) return null;
   if (esAlterno) return pr.tipo === "taulerf" ? 0 : 2;
-  return pr.tipo === "taulerh" ? 0 : null;
+  if (pr.tipo !== "taulerh") return null;
+  return dim[1] <= Math.min(dim[0], dim[2]) && dim[2] > dim[0] * 1.1 ? 2 : 0;
 }
 
 // Un objeto de primer nivel es un mueble si es de un catálogo de fábrica (no del 1, general, ni del 641,
@@ -1068,6 +1077,8 @@ export function interpretarEscena3D(texto: string, opciones: OpcionesInterprete 
 
   /** Animaciones de frentes `extraible` (índice → ya se fijó su recorrido con el cesto). */
   const extraibles = new Map<number, boolean>();
+  /** `anguloAper` de cada animación de giro (para reconocer la hoja hija guardada abierta, ver `caminar`). */
+  const aperGiro = new Map<number, number>();
 
   const caminar = (
     n: Nodo,
@@ -1162,6 +1173,16 @@ export function interpretarEscena3D(texto: string, opciones: OpcionesInterprete 
     if (n.ang) {
       const a = n.ang.slice(0, 3).map((x) => ev(x, env) ?? 0);
       R = rotacion(a[0], a[1], a[2]);
+      // Hoja con bisagra guardada ABIERTA (`opened` + `ang(0,±A,0)` con A ≈ anguloAper, en la hoja o en su contenedor `C0` ya animado
+      // como giro): TeoWin trae la hoja girada A grados con su `virtual` desplazado al punto de giro. Se dibuja cerrada (sin giro y en el
+      // origen del contenedor, donde está la de una hoja guardada cerrada) y la animación de giro la abre desde ahí.
+      if (n.abierto && Math.abs(a[0]) < 0.01 && Math.abs(a[2]) < 0.01 && Math.abs(a[1]) >= 30 && Math.abs(a[1]) <= 180) {
+        const aper = n.anguloAper ?? (animPadre !== null && out.animaciones[animPadre]?.tipo === "giro" ? aperGiro.get(animPadre) ?? null : null);
+        if (aper !== null && Math.abs(Math.abs(a[1]) - aper) < 2) {
+          R = ID3;
+          pos = [0, 0, 0];
+        }
+      }
     }
     const M2 = mul(M, R);
     const d0 = apply(M, pos);
@@ -1265,6 +1286,7 @@ export function interpretarEscena3D(texto: string, opciones: OpcionesInterprete 
           });
         }
         anim = out.animaciones.length - 1;
+        aperGiro.set(anim, n.anguloAper);
       } else if (n.seAbre && !enCorr && env.P > 0) {
         const e = apply(M, [0, 0, 1]);
         out.animaciones.push({ tipo: "cajon", mod: id, eje: [r4(e[0]), r4(e[1]), r4(e[2])], dist: r1((n.porcen ?? 0.85) * env.P) });
@@ -1480,8 +1502,8 @@ export function interpretarEscena3D(texto: string, opciones: OpcionesInterprete 
           ...(pr.opacidad !== null ? { o: pr.opacidad } : {}),
           ...(cat !== catDeModulo.get(id ?? -1) ? { k: cat } : {}),
           ...(pr.etiqueta === "PSJ" ? { p: 1 as const } : {}),
-          ...(vetaDe(n, pr) !== null && !(cat === "636" && n.objeti === "EN") && recon === null && n.objeti !== "ZC" && pr.m !== "enci" && pr.etiqueta !== "PSJ"
-            ? { v: vetaDe(n, pr) as 0 | 1 | 2 }
+          ...(vetaDe(n, pr, dim) !== null && !(cat === "636" && n.objeti === "EN") && recon === null && n.objeti !== "ZC" && pr.m !== "enci" && pr.etiqueta !== "PSJ"
+            ? { v: vetaDe(n, pr, dim) as 0 | 1 | 2 }
             : {}),
         };
         out.cajas.push(cajaNueva);
@@ -1494,7 +1516,9 @@ export function interpretarEscena3D(texto: string, opciones: OpcionesInterprete 
       const losa = prismaDeContorno(n.camino, 30);
       if (losa) {
         const antes = out.mallas.length;
-        emitirMalla({ v: losa.v, i: losa.i, uv: null }, { m: "", c: [0.93, 0.93, 0.93], opacidad: null }, M2, T2, id, anim, cat, n.nombre);
+        // Es una pieza de mesada: se marca del catálogo 636 para que la casilla «Mesada» del visor la oculte (antes, con el catálogo del
+        // mueble, no llevaba `k` y la casilla no la ocultaba).
+        emitirMalla({ v: losa.v, i: losa.i, uv: null }, { m: "", c: [0.93, 0.93, 0.93], opacidad: null }, M2, T2, id, anim, "636", n.nombre);
         if (out.mallas.length > antes && n.objeti !== "SWL") {
           // Contorno en planta (x, z de la escena) para el control de cobertura del final.
           const poli = n.camino.map((q): [number, number] => {
