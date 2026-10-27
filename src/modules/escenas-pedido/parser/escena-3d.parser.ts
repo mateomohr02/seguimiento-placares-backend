@@ -11,6 +11,8 @@ import { evaluar, grupos, oculto, type Entorno } from "./expresion";
 // base, así se puede re-interpretar).
 type Vec3 = [number, number, number];
 
+// v40: se quita la regla de v39 sobre la veta de los `taulerh` sin marca más profundos que anchos: el usuario confirmó en TeoWin que el techo y la base
+// 400×570 del módulo 42 de 26-02502 llevan la veta a lo ancho (L). Un `taulerh` sin marca va siempre a lo ancho.
 // v39: (1) una hoja guardada ABIERTA (`opened` + `ang(0,±A,0)` con A ≈ `anguloAper`) se dibuja cerrada y la anima el giro de siempre (antes se dibujaba
 // abierta 110° y encima giraba: «abre hacia afuera»; y si su pos.x pasaba de 100 se tomaba por corredera y se desplazaba: placar 26-02502); (2) un
 // `taulerh` sin marca claramente más profundo que ancho (P > 1,1·L) lleva la veta a lo largo de la profundidad (techo 400×570 del módulo 42 de
@@ -39,7 +41,7 @@ type Vec3 = [number, number, number];
 // Tandembox desplazados); falta de un lateral de cajón (ver diseño.md §13.7).
 // v30: cocinas (catálogo 3): encimera reconstruida cuando el .3d la trae vacía, catálogo de cada pieza
 // siempre explícito si difiere del de su mueble, animaciones sin piezas descartadas (diseño.md §13.7).
-export const PARSER_VERSION = 39;
+export const PARSER_VERSION = 40;
 
 export interface CajaEscena {
   /** idEscena del módulo al que pertenece (null = no asociada). */
@@ -813,9 +815,8 @@ function cajaDeExtrusion(
  * Veta normal: taulerh a lo ancho (L, 0); taulerv y taulerf vertical (H, 1 = lo que el visor ya hacía: se omite → null). Alterna: gira al otro eje
  * del plano de la pieza: taulerh y taulerv → profundidad (P, 2); taulerf → ancho (L, 0). PENDIENTE de confirmar en TeoWin la dirección de la
  * alterna de taulerh/taulerv (taulerf alterno confirmado: frentes de cajón BB2-00078_004). null = sin cambios (extrusiones, orient raros).
- * Un taulerh SIN marca (tablero horizontal: su espesor H es la medida menor) corre a lo largo del lado más largo de su plano: a lo ancho (L) si es
- * más ancho que profundo o casi cuadrado (< 10 %), y a lo largo de la profundidad (P) si es claramente más profundo que ancho (techo 400×570 del
- * módulo 42 de 26-02502, visto en TeoWin). Con marca (alterna) y en taulerv/taulerf el tamaño no cuenta.
+ * Un taulerh SIN marca va a lo ancho (L), sea cual sea su proporción (techo y base 400×570 del módulo 42 de 26-02502, confirmado en TeoWin).
+ * Con marca (alterna) y en taulerv/taulerf el tamaño no cuenta.
  */
 function vetaDe(n: Nodo, pr: Primitiva, dim: Vec3): 0 | 1 | 2 | null {
   const normal = pr.tipo === "taulerh" ? 2 : pr.tipo === "taulerv" ? 3 : pr.tipo === "taulerf" ? 4 : null;
@@ -825,7 +826,7 @@ function vetaDe(n: Nodo, pr: Primitiva, dim: Vec3): 0 | 1 | 2 | null {
   if (!esAlterno && n.orient !== null && n.orient !== normal) return null;
   if (esAlterno) return pr.tipo === "taulerf" ? 0 : 2;
   if (pr.tipo !== "taulerh") return null;
-  return dim[1] <= Math.min(dim[0], dim[2]) && dim[2] > dim[0] * 1.1 ? 2 : 0;
+  return 0;
 }
 
 // Un objeto de primer nivel es un mueble si es de un catálogo de fábrica (no del 1, general, ni del 641,
