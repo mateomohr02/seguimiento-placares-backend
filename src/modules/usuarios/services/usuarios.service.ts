@@ -118,7 +118,8 @@ function traducirUnico(e: unknown): never {
 }
 
 export async function crearUsuario(input: UsuarioCrearInput, actor: Actor) {
-  if (input.rol === "admin" && !esAdmin(actor)) throw new AppError(SOLO_ADMIN, 403);
+  // Nadie crea usuarios admin desde la app (ni un admin): el alta de un admin se hace por base.
+  if (input.rol === "admin") throw new AppError("No se pueden crear usuarios con el rol admin.", 403);
   await exigirPinLibre(input.pin, actor);
   await exigirNombreLibre(input.nombre, input.apellido);
   const estaciones = await exigirEstaciones(input.estaciones_ids);
