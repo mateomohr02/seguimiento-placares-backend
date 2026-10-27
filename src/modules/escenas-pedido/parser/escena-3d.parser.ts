@@ -11,6 +11,12 @@ import { evaluar, grupos, oculto, type Entorno } from "./expresion";
 // base, así se puede re-interpretar).
 type Vec3 = [number, number, number];
 
+// v41: (1) los marcos de nodo (`ang(a,b,c)` de un contenedor, p. ej. la tapa de una «repisa tipo cajón con puerta superior» `ang(90,180,0)`) se
+// componen en el orden de TeoWin para los herrajes (Rx·Ry·Rz), no Rz·Ry·Rx: la tapa quedaba detrás del mueble y, al abrirla, apuntaba hacia
+// afuera de la escena (CR-03821, módulos 309, 478, 480, 481 y 482); cambian solo esas tapas y los perfiles `ang(90,90,0)` de 26-02476 (mód. 140);
+// (2) una hoja con bisagras horizontales que cubre el mueble por arriba (tapa) se levanta: el sentido sale de la velocidad vertical de su centro,
+// no del frente; (3) un panel de puerta con ventana pasante (`HOLE` de todo el espesor: frente vidriado, columna despensera de CR-03821 mód. 465)
+// se dibuja como marco de cuatro listones y deja ver el interior (antes: losa maciza más el aro del contorno, sin ventana).
 // v40: se quita la regla de v39 sobre la veta de los `taulerh` sin marca más profundos que anchos: el usuario confirmó en TeoWin que el techo y la base
 // 400×570 del módulo 42 de 26-02502 llevan la veta a lo ancho (L). Un `taulerh` sin marca va siempre a lo ancho.
 // v39: (1) una hoja guardada ABIERTA (`opened` + `ang(0,±A,0)` con A ≈ `anguloAper`) se dibuja cerrada y la anima el giro de siempre (antes se dibujaba
@@ -41,7 +47,7 @@ type Vec3 = [number, number, number];
 // Tandembox desplazados); falta de un lateral de cajón (ver diseño.md §13.7).
 // v30: cocinas (catálogo 3): encimera reconstruida cuando el .3d la trae vacía, catálogo de cada pieza
 // siempre explícito si difiere del de su mueble, animaciones sin piezas descartadas (diseño.md §13.7).
-export const PARSER_VERSION = 40;
+export const PARSER_VERSION = 41;
 
 export interface CajaEscena {
   /** idEscena del módulo al que pertenece (null = no asociada). */
@@ -810,6 +816,38 @@ function cajaDeExtrusion(
 }
 
 /**
+ * Ventana de un panel de puerta: el panel `PAN` lleva un hijo `HOLE` (recortaCamino) cuyo contorno (`sinTapas`, el aro del moldurado) tiene el
+ * mismo espesor que el panel cuando la ventana lo atraviesa (frente vidriado); si es más fino, es solo un rebaje de la cara y el panel sigue entero.
+ */
+function ventanaDePanel(
+  n: Nodo,
+  env: Entorno,
+  evVec: (g: string[] | undefined, env: Entorno) => Vec3 | null,
+  dim: Vec3,
+): { x0: number; y0: number; x1: number; y1: number; aro: Nodo } | null {
+  const hueco = n.kids.find((k) => k.nombre === "HOLE");
+  const aro = hueco?.kids.find((k) => k.virtual !== null);
+  if (!aro || !aro.virtual) return null;
+  const p = evVec(aro.virtual[0], env);
+  const t = evVec(aro.virtual[1], env);
+  if (!p || !t || t[2] < dim[2] - 0.5 || t[0] < 1 || t[1] < 1) return null;
+  const x0 = Math.max(0, p[0]);
+  const y0 = Math.max(0, p[1]);
+  const x1 = Math.min(dim[0], p[0] + t[0]);
+  const y1 = Math.min(dim[1], p[1] + t[1]);
+  return x1 > x0 && y1 > y0 ? { x0, y0, x1, y1, aro } : null;
+}
+
+/** Los cuatro listones (izquierdo, derecho, inferior y superior) que rodean la ventana de un panel; `off` y `dim` son los del panel entero. */
+function marcoDeVentana(off: Vec3, dim: Vec3, v: { x0: number; y0: number; x1: number; y1: number }): [Vec3, Vec3][] {
+  const caja = (x0: number, y0: number, x1: number, y1: number): [Vec3, Vec3] => [
+    [off[0] + x0, off[1] + y0, off[2]],
+    [x1 - x0, y1 - y0, dim[2]],
+  ];
+  return [caja(0, 0, v.x0, dim[1]), caja(v.x1, 0, dim[0], dim[1]), caja(v.x0, 0, v.x1, v.y0), caja(v.x0, v.y1, v.x1, dim[1])];
+}
+
+/**
  * Veta de un tablero (`taulerh/v/f`) según TeoWin: `orient N` del objeto + marca `texV` de la primitiva.
  * Códigos de `orient`: taulerf 4 normal / 1 alterno; taulerh 2 / 6; taulerv 3 / 5. `texV` manda (24 taulerh la traen con el `orient` en un padre).
  * Veta normal: taulerh a lo ancho (L, 0); taulerv y taulerf vertical (H, 1 = lo que el visor ya hacía: se omite → null). Alterna: gira al otro eje
@@ -1173,7 +1211,7 @@ export function interpretarEscena3D(texto: string, opciones: OpcionesInterprete 
     let R = ID3;
     if (n.ang) {
       const a = n.ang.slice(0, 3).map((x) => ev(x, env) ?? 0);
-      R = rotacion(a[0], a[1], a[2]);
+      R = rotacionHerraje(a[0], a[1], a[2]);
       // Hoja con bisagra guardada ABIERTA (`opened` + `ang(0,±A,0)` con A ≈ anguloAper, en la hoja o en su contenedor `C0` ya animado
       // como giro): TeoWin trae la hoja girada A grados con su `virtual` desplazado al punto de giro. Se dibuja cerrada (sin giro y en el
       // origen del contenedor, donde está la de una hoja guardada cerrada) y la animación de giro la abre desde ahí.
@@ -1268,7 +1306,10 @@ export function interpretarEscena3D(texto: string, opciones: OpcionesInterprete 
           const rad = [centro[0] - borde[0], centro[1] - borde[1], centro[2] - borde[2]];
           const fr = apply(mk.M, [0, 0, 1]);
           const vel = [eje[1] * rad[2] - eje[2] * rad[1], eje[2] * rad[0] - eje[0] * rad[2], eje[0] * rad[1] - eje[1] * rad[0]];
-          const sentido = vel[0] * fr[0] + vel[1] * fr[1] + vel[2] * fr[2] >= 0 ? 1 : -1;
+          // Una tapa horizontal (hoja que cubre el mueble por arriba: «repisa tipo cajón con puerta superior») se levanta; la velocidad de su
+          // centro es vertical y no dice nada del frente.
+          const tapa = Math.abs(rad[1]) < 0.25 * Math.hypot(rad[0], rad[1], rad[2]);
+          const sentido = (tapa ? vel[1] : vel[0] * fr[0] + vel[1] * fr[1] + vel[2] * fr[2]) >= 0 ? 1 : -1;
           out.animaciones.push({
             tipo: "giro",
             mod: id,
@@ -1476,40 +1517,49 @@ export function interpretarEscena3D(texto: string, opciones: OpcionesInterprete 
           dim = evVec(pr.args[1], env);
         }
         if (!off || !dim) continue;
-        // Volúmenes auxiliares (sin material ni color propio) y piezas planas (rieles
-        // de 0 mm de espesor) no se dibujan: TeoWin tampoco las muestra como sólidos.
-        if (!n.atrezzo && pr.m === "" && pr.c && pr.c[0] === 1 && pr.c[1] === 1 && pr.c[2] === 1) continue;
-        if (Math.min(dim[0], dim[1], dim[2]) < 0.5) continue;
-        const o = apply(M2, off);
-        let Mc = M2;
-        if (pr.ang) {
-          const a = pr.ang.slice(0, 3).map((x) => ev(x, env) ?? 0);
-          Mc = mul(M2, rotacion(a[0] ?? 0, a[1] ?? 0, a[2] ?? 0));
+        // Panel de puerta con una ventana pasante (`HOLE` del mismo espesor que el panel: frente vidriado): se dibuja como el marco de cuatro
+        // listones alrededor de la ventana, y el aro de su contorno (`sinTapas`) no se dibuja (era una caja maciza que la tapaba).
+        const ventana = n.objeti === "PAN" ? ventanaDePanel(n, env, evVec, dim) : null;
+        const partes: [Vec3, Vec3][] = ventana
+          ? marcoDeVentana(off, dim, ventana)
+          : [[off, dim]];
+        if (ventana) ventana.aro.nuncaVisible = true;
+        for (const [offP, dimP] of partes) {
+          // Volúmenes auxiliares (sin material ni color propio) y piezas planas (rieles
+          // de 0 mm de espesor) no se dibujan: TeoWin tampoco las muestra como sólidos.
+          if (!n.atrezzo && pr.m === "" && pr.c && pr.c[0] === 1 && pr.c[1] === 1 && pr.c[2] === 1) continue;
+          if (Math.min(dimP[0], dimP[1], dimP[2]) < 0.5) continue;
+          const o = apply(M2, offP);
+          let Mc = M2;
+          if (pr.ang) {
+            const a = pr.ang.slice(0, 3).map((x) => ev(x, env) ?? 0);
+            Mc = mul(M2, rotacion(a[0] ?? 0, a[1] ?? 0, a[2] ?? 0));
+          }
+          if (recon !== null) {
+            // Un almacén guarda varios trozos del mismo módulo en el mismo lugar (los de cada variante de corte): se dibuja uno.
+            const dup = `${id}|${pr.m}|${rv([T2[0] + o[0], T2[1] + o[1], T2[2] + o[2]]).join()}|${dim.join()}|${Mc.join()}`;
+            if (reconDibujadas.has(dup)) continue;
+            reconDibujadas.add(dup);
+          }
+          const cajaNueva: CajaEscena = {
+            mod: id,
+            m: n.objeti === "EN" && pr.m === "enci" && hdrEncimera ? hdrEncimera : pr.m,
+            c: pr.c,
+            t: rv([T2[0] + o[0], T2[1] + o[1], T2[2] + o[2]]),
+            r: Mc.map((x) => Math.round(x * 1e4) / 1e4),
+            s: [r1(dimP[0]), r1(dimP[1]), r1(dimP[2])],
+            ...(anim !== null ? { a: anim } : {}),
+            ...(pr.opacidad !== null ? { o: pr.opacidad } : {}),
+            ...(cat !== catDeModulo.get(id ?? -1) ? { k: cat } : {}),
+            ...(pr.etiqueta === "PSJ" ? { p: 1 as const } : {}),
+            ...(vetaDe(n, pr, dim) !== null && !(cat === "636" && n.objeti === "EN") && recon === null && n.objeti !== "ZC" && pr.m !== "enci" && pr.etiqueta !== "PSJ"
+              ? { v: vetaDe(n, pr, dim) as 0 | 1 | 2 }
+              : {}),
+          };
+          out.cajas.push(cajaNueva);
+          if (recon !== null) cajasRecon.push(cajaNueva);
+          if (n.objeti === "EN" && id !== null && cat === catDeModulo.get(id)) encimasModulo.push(cajaNueva);
         }
-        if (recon !== null) {
-          // Un almacén guarda varios trozos del mismo módulo en el mismo lugar (los de cada variante de corte): se dibuja uno.
-          const dup = `${id}|${pr.m}|${rv([T2[0] + o[0], T2[1] + o[1], T2[2] + o[2]]).join()}|${dim.join()}|${Mc.join()}`;
-          if (reconDibujadas.has(dup)) continue;
-          reconDibujadas.add(dup);
-        }
-        const cajaNueva: CajaEscena = {
-          mod: id,
-          m: n.objeti === "EN" && pr.m === "enci" && hdrEncimera ? hdrEncimera : pr.m,
-          c: pr.c,
-          t: rv([T2[0] + o[0], T2[1] + o[1], T2[2] + o[2]]),
-          r: Mc.map((x) => Math.round(x * 1e4) / 1e4),
-          s: [r1(dim[0]), r1(dim[1]), r1(dim[2])],
-          ...(anim !== null ? { a: anim } : {}),
-          ...(pr.opacidad !== null ? { o: pr.opacidad } : {}),
-          ...(cat !== catDeModulo.get(id ?? -1) ? { k: cat } : {}),
-          ...(pr.etiqueta === "PSJ" ? { p: 1 as const } : {}),
-          ...(vetaDe(n, pr, dim) !== null && !(cat === "636" && n.objeti === "EN") && recon === null && n.objeti !== "ZC" && pr.m !== "enci" && pr.etiqueta !== "PSJ"
-            ? { v: vetaDe(n, pr, dim) as 0 | 1 | 2 }
-            : {}),
-        };
-        out.cajas.push(cajaNueva);
-        if (recon !== null) cajasRecon.push(cajaNueva);
-        if (n.objeti === "EN" && id !== null && cat === catDeModulo.get(id)) encimasModulo.push(cajaNueva);
       }
     }
     if (enModulo && recon === null && n.camino.length >= 3 && !tieneGeometria(n) && (n.objeti === "SWL" || n.objeti === "EN" || n.objeti === "CPT")) {
