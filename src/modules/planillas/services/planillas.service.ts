@@ -99,13 +99,14 @@ async function preseleccion(u: UsuarioAutenticado, ub: Ubicacion): Promise<Opera
  * Los operarios tal como los ve (y los puede cambiar) el usuario de la sesión. Si es miembro de la estación y puede
  * completar planillas, aparece incluido y bloqueado (quien entra a una planilla se suma solo); los demás conservan el
  * bloqueo guardado. Las opciones son las personas activas de la estación más las que ya están en la planilla.
- * `estado` null = planilla que todavía no existe.
+ * `estado` null = planilla que todavía no existe. `soloLectura` (ver una planilla guardada por id, no abrirla para
+ * completarla) NO suma ni bloquea al usuario: muestra exactamente lo guardado, para no falsear el historial.
  */
-async function vistaOperarios(u: UsuarioAutenticado, ub: Ubicacion, estado: string | null, guardados: OperarioFila[]) {
+async function vistaOperarios(u: UsuarioAutenticado, ub: Ubicacion, estado: string | null, guardados: OperarioFila[], soloLectura = false) {
   const puedeCambiar = puedeConfigurar(u);
   const operarios = guardados.map((o) => ({ ...o }));
   // Corrigiendo una GUARDADA, técnica/admin ven exactamente lo guardado (pueden cambiar todo, incluso quitarse).
-  const sumarme = esMiembro(u, ub) && u.permisos.includes(PERMISOS.PLANILLAS_COMPLETAR) && !(estado === "GUARDADA" && puedeCambiar);
+  const sumarme = !soloLectura && esMiembro(u, ub) && u.permisos.includes(PERMISOS.PLANILLAS_COMPLETAR) && !(estado === "GUARDADA" && puedeCambiar);
   if (sumarme) {
     const yo = operarios.find((o) => o.usuario_id === u.id);
     if (yo) yo.bloqueado = true;
@@ -121,9 +122,9 @@ async function vistaOperarios(u: UsuarioAutenticado, ub: Ubicacion, estado: stri
   };
 }
 
-async function planillaDTO(p: PlanillaDB, u: UsuarioAutenticado) {
+async function planillaDTO(p: PlanillaDB, u: UsuarioAutenticado, soloLectura = false) {
   const guardados = p.operarios_planilla.map((o) => ({ usuario_id: o.usuario_id, nombre: o.nombre, bloqueado: o.bloqueado }));
-  const vista = await vistaOperarios(u, { estacion_trabajo_id: p.estacion_trabajo_id, estacion: p.estacion }, p.estado, guardados);
+  const vista = await vistaOperarios(u, { estacion_trabajo_id: p.estacion_trabajo_id, estacion: p.estacion }, p.estado, guardados, soloLectura);
   return {
     id: p.id as string | null,
     estacion: p.estacion,
@@ -202,7 +203,7 @@ async function cargarPorId(id: string) {
 export async function getPlanilla(u: UsuarioAutenticado, id: string) {
   const p = await cargarPorId(id);
   exigirVisible(u, { estacion_trabajo_id: p.estacion_trabajo_id, estacion: p.estacion });
-  return planillaDTO(p, u);
+  return planillaDTO(p, u, true);
 }
 
 export async function getVersion(u: UsuarioAutenticado, id: string) {
@@ -354,9 +355,14 @@ export async function guardarPlanilla(u: UsuarioAutenticado, estacionTrabajoId: 
   const usuario = u.nombre_completo;
   const pedidos = await pedidosPorCodigo(body.filas.map((f) => f.pedido_codigo));
 
+  let creando = false;
   const id = await prisma
     .$transaction(async (tx) => {
       const where = { estacion_trabajo_id: et.id, estacion, fecha };
+      // Dos PUT simultáneos sobre la misma planilla se serializan: se bloquea la fila hasta terminar la transacción.
+      const previa = await tx.planillaProduccion.findUnique({ where: { estacion_trabajo_id_estacion_fecha: where }, select: { id: true } });
+      if (previa) await tx.$queryRaw`SELECT "id" FROM "planilla_produccion" WHERE "id" = ${previa.id}::uuid FOR UPDATE`;
+      else creando = true;
       let existente = await tx.planillaProduccion.findUnique({
         where: { estacion_trabajo_id_estacion_fecha: where },
         include: { filas: { where: { eliminado_en: null }, select: filaSelect, orderBy: { orden: "asc" } }, operarios_planilla: { orderBy: { orden: "asc" } } },
@@ -368,6 +374,7 @@ export async function guardarPlanilla(u: UsuarioAutenticado, estacionTrabajoId: 
       if (!existente && !et.activa) throw new AppError(`La estación de trabajo ${et.nombre} está inactiva: no se pueden crear planillas nuevas.`, 409);
 
       const operarios = await resolverOperarios(tx, u, ub, existente?.estado ?? null, existente?.operarios_planilla ?? [], body.operarios);
+      if (body.estado === "GUARDADA" && operarios.length === 0) throw new AppError("Para cerrar la planilla tiene que figurar al menos un operario.", 400);
       const nombres = operarios.map((o) => o.nombre);
 
       if (!existente) {
@@ -427,7 +434,12 @@ export async function guardarPlanilla(u: UsuarioAutenticado, estacionTrabajoId: 
     })
     .catch((e: unknown) => {
       if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2002") {
-        throw new AppError("Esa planilla se estaba creando al mismo tiempo desde otro dispositivo: volvé a abrirla.", 409);
+        throw new AppError(
+          creando
+            ? "Esa planilla se estaba creando al mismo tiempo desde otro dispositivo: volvé a abrirla."
+            : "Esa planilla se estaba editando al mismo tiempo desde otro dispositivo: volvé a abrirla y reintentá.",
+          409,
+        );
       }
       throw e;
     });

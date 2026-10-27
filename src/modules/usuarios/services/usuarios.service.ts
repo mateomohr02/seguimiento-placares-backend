@@ -60,9 +60,38 @@ async function rolId(rol: RolUsuario) {
   return r.id;
 }
 
-async function exigirPinLibre(pin: string, excepto?: string) {
+// Límite de conflictos de PIN por usuario que llama (en memoria, se reinicia con el servidor; mismo patrón que el login
+// en auth.service.ts): probar PINs en el alta/edición permitiría descubrir el de otra persona por el 409 «en uso».
+const MAX_CONFLICTOS_PIN = 5;
+const VENTANA_PIN_MS = 10 * 60 * 1000;
+const conflictosPin = new Map<string, { cuenta: number; desde: number }>();
+
+function chequearBloqueoPin(actorId: string) {
+  const f = conflictosPin.get(actorId);
+  if (!f) return;
+  if (Date.now() - f.desde > VENTANA_PIN_MS) {
+    conflictosPin.delete(actorId);
+    return;
+  }
+  if (f.cuenta >= MAX_CONFLICTOS_PIN) {
+    const min = Math.ceil((VENTANA_PIN_MS - (Date.now() - f.desde)) / 60000);
+    throw new AppError(`Demasiados PIN en uso probados. Probá de nuevo en ${min} min.`, 429);
+  }
+}
+
+function registrarConflictoPin(actorId: string) {
+  const f = conflictosPin.get(actorId);
+  if (!f || Date.now() - f.desde > VENTANA_PIN_MS) conflictosPin.set(actorId, { cuenta: 1, desde: Date.now() });
+  else f.cuenta += 1;
+}
+
+async function exigirPinLibre(pin: string, actor: Actor, excepto?: string) {
+  chequearBloqueoPin(actor.id);
   const otro = await prisma.usuario.findUnique({ where: { pin }, select: { id: true } });
-  if (otro && otro.id !== excepto) throw new AppError("Ese PIN ya está en uso. Elegí otro.", 409);
+  if (!otro || otro.id === excepto) return;
+  // Respuesta siempre igual (409 genérico, también cuando el dueño es un admin y quien llama no): cada conflicto cuenta como intento.
+  registrarConflictoPin(actor.id);
+  throw new AppError("Ese PIN ya está en uso. Elegí otro.", 409);
 }
 
 // Mismo criterio que el índice único usuario_nombre_apellido_ci_key: lower(nombre), lower(apellido).
@@ -90,7 +119,7 @@ function traducirUnico(e: unknown): never {
 
 export async function crearUsuario(input: UsuarioCrearInput, actor: Actor) {
   if (input.rol === "admin" && !esAdmin(actor)) throw new AppError(SOLO_ADMIN, 403);
-  await exigirPinLibre(input.pin);
+  await exigirPinLibre(input.pin, actor);
   await exigirNombreLibre(input.nombre, input.apellido);
   const estaciones = await exigirEstaciones(input.estaciones_ids);
   const rol_id = await rolId(input.rol);
@@ -116,8 +145,10 @@ export async function actualizarUsuario(id: string, input: UsuarioEditarInput, a
   if (!actual) throw new AppError("Usuario no encontrado.", 404);
   if (!esAdmin(actor) && (actual.rol.nombre === "admin" || input.rol === "admin")) throw new AppError(SOLO_ADMIN, 403);
   if (input.activo === false && id === actor.id) throw new AppError("No podés desactivarte a vos mismo.", 400);
+  if (input.rol !== undefined && id === actor.id && input.rol !== actual.rol.nombre) throw new AppError("No podés cambiar tu propio rol.", 400);
+  if (input.apellido === "" && actual.apellido !== "") throw new AppError("El apellido es obligatorio.", 400);
 
-  if (input.pin !== undefined) await exigirPinLibre(input.pin, id);
+  if (input.pin !== undefined) await exigirPinLibre(input.pin, actor, id);
   if (input.nombre !== undefined || input.apellido !== undefined) {
     await exigirNombreLibre(input.nombre ?? actual.nombre, input.apellido ?? actual.apellido, id);
   }
