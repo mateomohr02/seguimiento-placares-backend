@@ -14,6 +14,8 @@ import { texturas3dRouter } from "./modules/texturas-3d/texturas-3d.router";
 import { planillasRouter } from "./modules/planillas/planillas.router";
 import { planificacionRouter } from "./modules/planificacion/planificacion.router";
 import { hojasCorteRouter, hojasDeOrdenRouter } from "./modules/hojas-corte/hojas-corte.router";
+import { usuariosRouter } from "./modules/usuarios/usuarios.router";
+import { estacionesTrabajoRouter } from "./modules/estaciones-trabajo/estaciones-trabajo.router";
 
 export const app = express();
 
@@ -45,5 +47,7 @@ app.use("/api/planificacion", planificacionRouter);
 app.use("/api/pedidos", pedidosRouter);
 app.use("/api/modulos", modulosRouter);
 app.use("/api/piezas", piezasRouter);
+app.use("/api/usuarios", usuariosRouter);
+app.use("/api/estaciones-trabajo", estacionesTrabajoRouter);
 
 app.use(errorController);

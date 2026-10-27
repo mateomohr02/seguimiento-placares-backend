@@ -10,7 +10,8 @@ import { actualizarItem, crearItem, eliminarItem, getSemana, marcarEstado } from
 
 // Planificación semanal de Termolaminado cargada por sistema (diseño.md §14.4), montada en /api/planificacion.
 // Ver: documentacion.ver. Cargar, editar y quitar filas: documentacion.gestionar (técnica). Marcar el estado de
-// producción de una fila: cualquier usuario con un estado asignado (lo configura técnica).
+// producción de una fila: cualquier usuario cuyas estaciones de trabajo activas tengan estado (`estado_id` en el body
+// para elegir cuál si tiene varios).
 export const planificacionRouter = Router();
 
 const texto = (max: number) =>
@@ -79,7 +80,7 @@ planificacionRouter.put(
   "/items/:id/marca",
   requierePermiso(PERMISOS.DOCUMENTACION_VER),
   catchAsync(async (req, res) => {
-    const { marcado } = z.object({ marcado: z.boolean() }).parse(req.body);
-    return sendResponse(res, 200, await marcarEstado(parseIdParam(String(req.params.id)), req.usuario!.id, req.usuario!.nombre, marcado));
+    const { marcado, estado_id } = z.object({ marcado: z.boolean(), estado_id: z.string().uuid().optional() }).parse(req.body);
+    return sendResponse(res, 200, await marcarEstado(parseIdParam(String(req.params.id)), req.usuario!.id, req.usuario!.nombre_completo, marcado, estado_id));
   }),
 );

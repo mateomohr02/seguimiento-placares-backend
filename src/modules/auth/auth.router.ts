@@ -25,7 +25,7 @@ authRouter.get(
   "/me",
   autenticar,
   catchAsync(async (req, res) => {
-    const { nombre, rol, permisos, planillas } = req.usuario!;
-    return sendResponse(res, 200, { nombre, rol, permisos, planillas });
+    const { id, nombre, apellido, rol, permisos, planillas, estaciones } = req.usuario!;
+    return sendResponse(res, 200, { id, nombre, apellido, rol, permisos, planillas, estaciones });
   }),
 );

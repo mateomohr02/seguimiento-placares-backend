@@ -153,7 +153,9 @@ async function main() {
   }
 
   // Configuración de termolaminado1: sus planillas, su estado de producción y sus operarios (si no los tiene).
-  const usuario = await prisma.usuario.findUnique({ where: { nombre: USUARIO }, select: { id: true } });
+  // (Desde 20261028120000_estaciones_trabajo termolaminado1 es una estación y su usuario queda inactivo: esto sigue
+  // sembrando la configuración vieja, que solo usa el pool de operarios hasta la fase 2.)
+  const usuario = await prisma.usuario.findFirst({ where: { nombre: USUARIO }, select: { id: true } });
   if (!usuario) {
     console.error(`No existe el usuario ${USUARIO} en la base de prueba. Crealo primero (npm run usuario:sql).`);
     process.exit(1);

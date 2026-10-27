@@ -1,9 +1,10 @@
 import { prisma } from "../../../config/prisma";
 import { AppError } from "../../../utils/AppError";
-import { ESTACIONES, type Estacion } from "../schemas/planilla.schema";
+import { type Estacion } from "../schemas/planilla.schema";
 
-// Lo que técnica configura por cada usuario de fábrica (diseño.md §14): qué planillas completa, qué estado de
-// producción marca en la planificación y qué operarios trabajan en su estación. Más el catálogo de estados.
+// Operarios del usuario que completa una planilla y catálogo de estados de producción (diseño.md §14 y §17).
+// La configuración por usuario (planillas y estado) pasó a las estaciones de trabajo (módulo estaciones-trabajo);
+// el pool de operarios (usuario_operario) sigue acá hasta la fase 2 de «operarios por estación».
 
 export const MAX_OPERARIOS = 10;
 
@@ -16,7 +17,7 @@ export async function operariosDe(usuarioId: string) {
 /**
  * Operarios que se preseleccionan al abrir una planilla nueva, por estación asignada: los que el usuario dejó elegidos la
  * última vez en esa estación (se guardan al completar la planilla) o, si nunca los cambió, todos sus operarios. Solo se
- * devuelven los que siguen en la lista del usuario.
+ * devuelven los que siguen en la lista del usuario. (Lee las tablas viejas: lo reemplaza la fase 2.)
  */
 export async function predeterminadosDe(usuarioId: string) {
   const [pool, asignadas] = await Promise.all([operariosDe(usuarioId), prisma.usuarioPlanilla.findMany({ where: { usuario_id: usuarioId }, select: { estacion: true, operarios_predeterminados: true } })]);
@@ -30,17 +31,22 @@ export async function predeterminadosDe(usuarioId: string) {
 
 // ───────────────────────── Catálogo de estados de producción ─────────────────────────
 
+/**
+ * `estaciones`: cuántas estaciones de trabajo lo tienen asignado. `usuarios` se mantiene por compatibilidad con la forma
+ * anterior y ahora vale lo mismo que `estaciones` (el estado lo tiene la estación, no el usuario).
+ */
 export async function listarEstados() {
   const e = await prisma.estadoProduccion.findMany({
     orderBy: [{ orden: "asc" }, { creado_en: "asc" }],
-    select: { id: true, nombre: true, color: true, _count: { select: { usuarios: true, marcas: true } } },
+    select: { id: true, nombre: true, color: true, _count: { select: { estaciones: true, usuarios: true, marcas: true } } },
   });
-  return e.map((x) => ({ id: x.id, nombre: x.nombre, color: x.color, usuarios: x._count.usuarios, marcas: x._count.marcas }));
+  return e.map((x) => ({ id: x.id, nombre: x.nombre, color: x.color, estaciones: x._count.estaciones, usuarios: x._count.estaciones, marcas: x._count.marcas, asignaciones_viejas: x._count.usuarios }));
 }
 
 /**
  * Reemplaza el catálogo con la lista enviada: los que traen `id` se renombran, los nuevos se crean y los que ya no
- * están se borran, salvo que tengan usuarios asignados o marcas en la planificación (se rechaza).
+ * están se borran, salvo que estén asignados a estaciones de trabajo, tengan marcas en la planificación o sigan
+ * referenciados por la configuración vieja por usuario (usuario_estado_produccion, conservada sin uso): se rechaza.
  */
 export async function guardarEstados(estados: { id?: string; nombre: string; color?: string | null }[]) {
   const limpios = estados.map((e) => ({ id: e.id, nombre: e.nombre.trim().replace(/\s+/g, " "), color: e.color ? e.color.toLowerCase() : null })).filter((e) => e.nombre);
@@ -56,8 +62,11 @@ export async function guardarEstados(estados: { id?: string; nombre: string; col
   for (const e of limpios) if (e.id && !actuales.some((a) => a.id === e.id)) throw new AppError("Un estado no existe.", 400);
   const aBorrar = actuales.filter((a) => !idsEnviados.has(a.id));
   for (const b of aBorrar) {
-    if (b.usuarios > 0) throw new AppError(`No se puede quitar "${b.nombre}": está asignado a ${b.usuarios} usuario(s). Cambialo primero.`, 409);
+    if (b.estaciones > 0) throw new AppError(`No se puede quitar "${b.nombre}": está asignado a ${b.estaciones} estación(es) de trabajo. Cambialo primero.`, 409);
     if (b.marcas > 0) throw new AppError(`No se puede quitar "${b.nombre}": ya tiene ${b.marcas} marca(s) en la planificación.`, 409);
+    if (b.asignaciones_viejas > 0) {
+      throw new AppError(`No se puede quitar "${b.nombre}": sigue asignado en la configuración anterior por usuario (se conserva como historial).`, 409);
+    }
   }
 
   await prisma.$transaction(async (tx) => {
@@ -70,67 +79,4 @@ export async function guardarEstados(estados: { id?: string; nombre: string; col
     }
   });
   return listarEstados();
-}
-
-// ───────────────────────── Configuración por usuario ─────────────────────────
-
-export async function listarConfiguracionUsuarios() {
-  const usuarios = await prisma.usuario.findMany({
-    where: { activo: true },
-    orderBy: { nombre: "asc" },
-    select: {
-      id: true,
-      nombre: true,
-      rol: { select: { nombre: true } },
-      planillas: { select: { estacion: true } },
-      estadoProduccion: { select: { estado_id: true } },
-      operarios: { orderBy: { orden: "asc" }, select: { nombre: true } },
-    },
-  });
-  return usuarios.map((u) => ({
-    id: u.id,
-    nombre: u.nombre,
-    rol: u.rol.nombre,
-    estaciones: ESTACIONES.filter((e) => u.planillas.some((p) => p.estacion === e)),
-    estado_id: u.estadoProduccion?.estado_id ?? null,
-    operarios: u.operarios.map((o) => o.nombre),
-  }));
-}
-
-export interface ConfiguracionUsuarioInput {
-  estaciones: string[];
-  estado_id: string | null;
-  operarios: string[];
-}
-
-export async function guardarConfiguracionUsuario(usuarioId: string, input: ConfiguracionUsuarioInput) {
-  const u = await prisma.usuario.findUnique({ where: { id: usuarioId }, select: { activo: true } });
-  if (!u || !u.activo) throw new AppError("Usuario no encontrado.", 404);
-
-  const unicas = [...new Set(input.estaciones)];
-  if (unicas.some((e) => !(ESTACIONES as readonly string[]).includes(e))) throw new AppError("Estación inválida.", 400);
-  const estaciones = unicas as Estacion[];
-
-  const nombres = input.operarios.map((n) => n.trim().replace(/\s+/g, " ")).filter(Boolean);
-  const vistos = new Set<string>();
-  for (const n of nombres) {
-    const k = n.toLowerCase();
-    if (vistos.has(k)) throw new AppError(`El operario "${n}" está repetido.`, 400);
-    vistos.add(k);
-  }
-  if (nombres.length > MAX_OPERARIOS) throw new AppError(`Se admiten hasta ${MAX_OPERARIOS} operarios.`, 400);
-
-  if (input.estado_id && !(await prisma.estadoProduccion.findUnique({ where: { id: input.estado_id }, select: { id: true } }))) {
-    throw new AppError("El estado de producción no existe.", 400);
-  }
-
-  await prisma.$transaction([
-    // Solo se quitan las estaciones que dejó de tener y se agregan las nuevas: las que siguen conservan sus operarios predeterminados.
-    prisma.usuarioPlanilla.deleteMany({ where: { usuario_id: usuarioId, estacion: { notIn: estaciones } } }),
-    prisma.usuarioPlanilla.createMany({ data: estaciones.map((estacion) => ({ usuario_id: usuarioId, estacion })), skipDuplicates: true }),
-    prisma.usuarioEstadoProduccion.deleteMany({ where: { usuario_id: usuarioId } }),
-    ...(input.estado_id ? [prisma.usuarioEstadoProduccion.create({ data: { usuario_id: usuarioId, estado_id: input.estado_id } })] : []),
-    prisma.usuarioOperario.deleteMany({ where: { usuario_id: usuarioId } }),
-    prisma.usuarioOperario.createMany({ data: nombres.map((nombre, orden) => ({ usuario_id: usuarioId, nombre, orden })) }),
-  ]);
 }

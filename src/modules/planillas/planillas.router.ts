@@ -27,26 +27,19 @@ import {
   MAX_FOTO_BYTES,
   MIMES_FOTO,
 } from "./services/fotos-operarios.service";
-import {
-  guardarConfiguracionUsuario,
-  guardarEstados,
-  listarConfiguracionUsuarios,
-  listarEstados,
-  MAX_OPERARIOS,
-  operariosDe,
-  predeterminadosDe,
-} from "./services/configuracion-usuarios.service";
+import { guardarEstados, listarEstados, operariosDe, predeterminadosDe } from "./services/configuracion-usuarios.service";
 
 // Planillas de producción de Termolaminado (diseño.md §14). Montado en /api/planillas.
 // Ver (tabla, indicadores, trazabilidad): planillas.ver. Completar y corregir: planillas.completar.
 export const planillasRouter = Router();
 
-// Completar una planilla exige el permiso (en la ruta) y tener asignada esa estación.
+// Completar una planilla exige el permiso (en la ruta) y que esa planilla esté en alguna de sus estaciones de trabajo
+// activas (`req.usuario.planillas`, diseño.md §17).
 function exigirAcceso(asignadas: string[], estacion: string) {
   if (!asignadas.includes(estacion)) throw new AppError("No tenés acceso a esta planilla.", 403);
 }
 
-// Estaciones cuyos registros puede ver el usuario: los de fábrica, solo las planillas que tienen asignadas;
+// Estaciones cuyos registros puede ver el usuario: los de fábrica, solo las planillas de sus estaciones de trabajo activas;
 // el resto de los roles (técnica, gerencia, admin), todas.
 function estacionesVisibles(u: { rol: string; planillas: string[] }): Estacion[] {
   return u.rol === "fabrica" ? ESTACIONES.filter((e) => u.planillas.includes(e)) : [...ESTACIONES];
@@ -75,7 +68,7 @@ planillasRouter.put(
     const estacion = parseEstacion(String(req.params.estacion));
     exigirAcceso(req.usuario!.planillas, estacion);
     const body = parsearPlanillaBody(req.body);
-    const planilla = await guardarPlanilla(estacion, String(req.params.fecha), body, req.usuario!.nombre, req.usuario!.id);
+    const planilla = await guardarPlanilla(estacion, String(req.params.fecha), body, req.usuario!.nombre_completo, req.usuario!.id);
     return sendResponse(res, 200, planilla);
   }),
 );
@@ -136,28 +129,8 @@ planillasRouter.get(
   ),
 );
 
-// Configuración por usuario de fábrica (técnica): planillas que completa, estado de producción y operarios.
-planillasRouter.get(
-  "/accesos",
-  requierePermiso(PERMISOS.PLANILLAS_CONFIGURAR),
-  catchAsync(async (_req, res) => sendResponse(res, 200, await listarConfiguracionUsuarios())),
-);
-
-planillasRouter.put(
-  "/accesos/:usuarioId",
-  requierePermiso(PERMISOS.PLANILLAS_CONFIGURAR),
-  catchAsync(async (req, res) => {
-    const input = z
-      .object({
-        estaciones: z.array(z.string()).max(3),
-        estado_id: z.string().uuid().nullable(),
-        operarios: z.array(z.string().max(60)).max(MAX_OPERARIOS),
-      })
-      .parse(req.body);
-    await guardarConfiguracionUsuario(parseIdParam(String(req.params.usuarioId)), input);
-    return sendResponse(res, 200, await listarConfiguracionUsuarios());
-  }),
-);
+// La configuración por usuario (/planillas/accesos) se quitó: las planillas y el estado productivo los tiene la
+// estación de trabajo (/api/estaciones-trabajo, diseño.md §17).
 
 // Catálogo de estados de producción (los define técnica).
 planillasRouter.get(
@@ -195,7 +168,7 @@ planillasRouter.post(
     if (!Buffer.isBuffer(req.body)) throw new AppError("Se esperaba una imagen (JPG, PNG o WEBP).", 415);
     const filaId = parseIdParam(String(req.params.filaId));
     exigirAcceso(req.usuario!.planillas, await estacionDeFila(filaId));
-    return sendResponse(res, 201, await agregarFoto(filaId, req.body, req.usuario!.nombre));
+    return sendResponse(res, 201, await agregarFoto(filaId, req.body, req.usuario!.nombre_completo));
   }),
 );
 

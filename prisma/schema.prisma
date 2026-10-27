@@ -309,8 +309,8 @@ model PlanoPedidoAnotacion {
 
 // Usuarios, roles y permisos — feature/usuarios-roles-permisos. Tablas aparte, no
 // tocan ninguna de las existentes. Cada usuario tiene un PIN numérico (único) que
-// se guarda en texto plano (decisión del usuario, app interna). Los usuarios
-// y roles se administran directo en la base (no hay interfaz); `rol_permiso` es la
+// se guarda en texto plano (decisión del usuario, app interna). Los usuarios se
+// administran desde la app (módulo usuarios) y los roles directo en la base; `rol_permiso` es la
 // tabla de funcionalidades que tiene cada rol. Un usuario no se borra: se pone
 // activo = false.
 model Rol {
@@ -345,9 +345,13 @@ model RolPermiso {
   @@map("rol_permiso")
 }
 
+// Usuario = persona (operario, técnica, gerencia, admin): lo administra técnica desde la app (módulo usuarios).
+// Único por (nombre, apellido) sin distinguir mayúsculas: índice de expresión `usuario_nombre_apellido_ci_key`
+// (lower(nombre), lower(apellido)), creado a mano en 20261028120000_estaciones_trabajo (Prisma no lo expresa).
 model Usuario {
   id             String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  nombre         String    @unique
+  nombre         String
+  apellido       String    @default("")
   pin            String    @unique
   rol_id         String    @db.Uuid
   activo         Boolean   @default(true)
@@ -355,6 +359,9 @@ model Usuario {
   ultimo_acceso  DateTime?
 
   rol Rol @relation(fields: [rol_id], references: [id])
+  estaciones UsuarioEstacionTrabajo[]
+  // Configuración vieja (un usuario = una estación): se conserva sin uso desde 20261028120000_estaciones_trabajo,
+  // salvo `operarios` (usuario_operario), que sigue siendo el pool de operarios hasta la fase 2.
   planillas UsuarioPlanilla[]
   operarios UsuarioOperario[]
   estadoProduccion UsuarioEstadoProduccion?
@@ -545,10 +552,53 @@ model EstadoProduccion {
   orden     Int      @default(0)
   creado_en DateTime @default(now())
 
-  usuarios UsuarioEstadoProduccion[]
-  marcas   PlanificacionMarca[]
+  usuarios   UsuarioEstadoProduccion[] // configuración vieja, sin uso
+  estaciones EstacionTrabajo[]
+  marcas     PlanificacionMarca[]
 
   @@map("estado_produccion")
+}
+
+// Estación de trabajo (termolaminado1, mecanizado1, cortadora1…): NO tiene login. La crea técnica. Tiene un estado
+// productivo (opcional; es el que marcan sus operarios en la planificación) y las planillas que completan sus
+// operarios. No se borra: activa = false. Nombre único sin distinguir mayúsculas: índice de expresión
+// `estacion_trabajo_nombre_ci_key` (lower(nombre)), creado a mano en la migración.
+model EstacionTrabajo {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  nombre    String
+  activa    Boolean  @default(true)
+  creado_en DateTime @default(now())
+  estado_id String?  @db.Uuid
+
+  estado    EstadoProduccion?         @relation(fields: [estado_id], references: [id], onDelete: Restrict)
+  planillas EstacionTrabajoPlanilla[]
+  usuarios  UsuarioEstacionTrabajo[]
+
+  @@index([estado_id])
+  @@map("estacion_trabajo")
+}
+
+model EstacionTrabajoPlanilla {
+  estacion_trabajo_id String           @db.Uuid
+  planilla            PlanillaEstacion
+
+  estacion EstacionTrabajo @relation(fields: [estacion_trabajo_id], references: [id], onDelete: Cascade)
+
+  @@id([estacion_trabajo_id, planilla])
+  @@map("estacion_trabajo_planilla")
+}
+
+// Usuario (persona) <-> estación: muchos a muchos. No es obligatorio (técnica, gerencia y admin pueden no tener).
+model UsuarioEstacionTrabajo {
+  usuario_id          String @db.Uuid
+  estacion_trabajo_id String @db.Uuid
+
+  usuario  Usuario         @relation(fields: [usuario_id], references: [id], onDelete: Cascade)
+  estacion EstacionTrabajo @relation(fields: [estacion_trabajo_id], references: [id], onDelete: Cascade)
+
+  @@id([usuario_id, estacion_trabajo_id])
+  @@index([estacion_trabajo_id])
+  @@map("usuario_estacion_trabajo")
 }
 
 model UsuarioEstadoProduccion {

@@ -4,7 +4,8 @@ import { AppError } from "../../utils/AppError";
 import { AREA_TERMOLAMINADO, fechaISO, parseFecha } from "../planillas/schemas/planilla.schema";
 
 // Planificación semanal de Termolaminado cargada por sistema (diseño.md §14.4): pedidos y reclamos que baja la
-// oficina técnica. Cada usuario de fábrica con un estado de producción asignado puede marcarlo en cada fila.
+// oficina técnica. El estado de producción lo tiene la estación de trabajo: cualquier usuario de la estación (activa)
+// puede marcarlo en cada fila; si está en varias estaciones con estados distintos, puede marcar cualquiera (§17).
 
 const DIA_MS = 86_400_000;
 
@@ -61,16 +62,22 @@ function itemDTO(i: ItemDB) {
   };
 }
 
-/** El estado de producción asignado al usuario (null si técnica no le asignó ninguno). */
-export async function estadoDeUsuario(usuarioId: string) {
-  const e = await prisma.usuarioEstadoProduccion.findUnique({ where: { usuario_id: usuarioId }, select: { estado: { select: { id: true, nombre: true, color: true } } } });
-  return e?.estado ?? null;
+/**
+ * Estados de producción que el usuario puede marcar: los de sus estaciones de trabajo activas (diseño.md §17), sin
+ * repetir, en el orden del catálogo. Vacío si ninguna de sus estaciones tiene estado (o si no tiene estaciones).
+ */
+export async function estadosDeUsuario(usuarioId: string) {
+  return prisma.estadoProduccion.findMany({
+    where: { estaciones: { some: { activa: true, usuarios: { some: { usuario_id: usuarioId } } } } },
+    orderBy: [{ orden: "asc" }, { creado_en: "asc" }],
+    select: { id: true, nombre: true, color: true },
+  });
 }
 
 export async function getSemana(semanaRaw: string | undefined, usuarioId: string) {
   const hoy = parseFecha(fechaISO(new Date()));
   const semana = lunesDe(semanaRaw ? parseFecha(semanaRaw, "La semana") : hoy);
-  const [items, semanas, estados, miEstado] = await Promise.all([
+  const [items, semanas, estados, misEstados] = await Promise.all([
     prisma.planificacionItem.findMany({
       where: { area: AREA_TERMOLAMINADO, semana_inicio: semana, eliminado_en: null },
       select: itemSelect,
@@ -84,13 +91,15 @@ export async function getSemana(semanaRaw: string | undefined, usuarioId: string
       take: 30,
     }),
     prisma.estadoProduccion.findMany({ orderBy: [{ orden: "asc" }, { creado_en: "asc" }], select: { id: true, nombre: true, color: true } }),
-    estadoDeUsuario(usuarioId),
+    estadosDeUsuario(usuarioId),
   ]);
   return {
     semana_inicio: fechaISO(semana),
     semanas: semanas.map((s) => fechaISO(s.semana_inicio)),
     estados,
-    mi_estado: miEstado,
+    // Compatibilidad: el primero de `mis_estados` (o null). Con varios, el frontend tiene que usar `mis_estados`.
+    mi_estado: misEstados[0] ?? null,
+    mis_estados: misEstados,
     items: items.map(itemDTO),
   };
 }
@@ -168,11 +177,22 @@ export async function eliminarItem(id: string) {
   await prisma.planificacionItem.update({ where: { id }, data: { eliminado_en: new Date() } });
 }
 
-/** Marca o desmarca, en una fila, el estado de producción que técnica le asignó al usuario. */
-export async function marcarEstado(itemId: string, usuarioId: string, usuarioNombre: string, marcado: boolean) {
+/**
+ * Marca o desmarca, en una fila, uno de los estados de producción de las estaciones del usuario. `estadoId` es
+ * opcional si el usuario tiene un solo estado posible; con varios es obligatorio.
+ */
+export async function marcarEstado(itemId: string, usuarioId: string, usuarioNombre: string, marcado: boolean, estadoId?: string) {
   await itemVigente(itemId);
-  const estado = await estadoDeUsuario(usuarioId);
-  if (!estado) throw new AppError("No tenés un estado de producción asignado.", 403);
+  const mios = await estadosDeUsuario(usuarioId);
+  if (mios.length === 0) throw new AppError("Tus estaciones de trabajo no tienen un estado de producción asignado.", 403);
+  let estado = mios[0];
+  if (estadoId) {
+    const elegido = mios.find((e) => e.id === estadoId);
+    if (!elegido) throw new AppError("Ese estado no es de ninguna de tus estaciones de trabajo.", 403);
+    estado = elegido;
+  } else if (mios.length > 1) {
+    throw new AppError("Tenés varios estados posibles: elegí cuál marcar (estado_id).", 400);
+  }
   const clave = { item_id_estado_id: { item_id: itemId, estado_id: estado.id } };
   if (marcado) {
     await prisma.planificacionMarca.upsert({
