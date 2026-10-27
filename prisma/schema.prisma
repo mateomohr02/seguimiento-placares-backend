@@ -31,6 +31,13 @@ enum PedidoEstado {
   ELIMINADO
 }
 
+// Línea de producto de un módulo (mueble). Se asigna al sincronizar la orden según el
+// idCatalogo de TeoWin: 3 = COCINAS, 4 = PLACARES. Una orden/pedido puede ser mixto.
+enum LineaProducto {
+  PLACARES
+  COCINAS
+}
+
 enum ModuloEstado {
   PENDIENTE
   EN_PRODUCCION
@@ -91,6 +98,7 @@ model Modulo {
   pedido_id    String       @db.Uuid
   idEscena     Int
   descripcion  String
+  linea        LineaProducto // PLACARES o COCINAS (idCatalogo de la fila raíz del módulo; ver sync/linea-producto.ts)
   estado       ModuloEstado @default(PENDIENTE)
   creado_en    DateTime     @default(now())
   eliminado_en DateTime?
@@ -98,8 +106,33 @@ model Modulo {
   pedido         Pedido         @relation(fields: [pedido_id], references: [id])
   despieceTipos  DespieceTipo[]
   planos         PlanoPedido[]
+  partida        ModuloPartida?
 
   @@map("modulo")
+}
+
+// Partida de TeoWin del módulo (fila de tpresupuestoLineas de su raíz de despiece): el detalle del presupuesto.
+// 1:1 con Modulo (comparte su ciclo de vida: se oculta junto con el módulo eliminado). Los importes
+// (variantes, precio_unitario, total) son datos de gestión: solo los ve el permiso `modulos.precios`.
+model ModuloPartida {
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  modulo_id       String   @unique @db.Uuid
+  unidades        Float
+  referencia      String // familia/articulo/color de la raíz
+  titulo          String? // descripcion3D (primera línea)
+  descripcion     String // texto multilínea, con saltos de línea, sin saltos finales
+  largo           Float?
+  alto            Float?
+  profundidad     Float?
+  capitulo        String?
+  variantes       Float? // tpresupuestoLineas.precioVariantes (pendiente de confirmar que es el «Variantes» de pantalla)
+  precio_unitario Float? // tpresupuestoLineas.precio
+  total           Float? // precio * cantidad
+  creado_en       DateTime @default(now())
+
+  modulo Modulo @relation(fields: [modulo_id], references: [id])
+
+  @@map("modulo_partida")
 }
 
 model DespieceTipo {

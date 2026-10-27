@@ -4,7 +4,7 @@ import { AppError } from "../../../utils/AppError";
 export async function getPedido(id: string) {
   const pedido = await prisma.pedido.findUnique({
     where: { id },
-    include: { orden: true, modulos: { select: { id: true } } },
+    include: { orden: true, modulos: { select: { id: true, linea: true } } },
   });
   if (!pedido || pedido.estado === "ELIMINADO") {
     throw new AppError("Pedido no encontrado.", 404);

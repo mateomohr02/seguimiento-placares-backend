@@ -39,7 +39,7 @@ export async function eliminarOrden(id: string) {
     return tx.orden.update({
       where: { id },
       data: { estado: "ELIMINADO", eliminado_en: ahora },
-      include: { pedidos: { select: { id: true } } },
+      include: { pedidos: { select: { id: true, modulos: { select: { linea: true } } } } },
     });
   });
 }
