@@ -361,9 +361,10 @@ model Usuario {
   rol Rol @relation(fields: [rol_id], references: [id])
   estaciones UsuarioEstacionTrabajo[]
   // Configuración vieja (un usuario = una estación): se conserva sin uso desde 20261028120000_estaciones_trabajo,
-  // salvo `operarios` (usuario_operario), que sigue siendo el pool de operarios hasta la fase 2.
+  // incluida `operarios` (usuario_operario): desde la fase 2 el código ya no la usa.
   planillas UsuarioPlanilla[]
   operarios UsuarioOperario[]
+  planillasOperario PlanillaOperario[]
   estadoProduccion UsuarioEstadoProduccion?
 
   @@index([rol_id])
@@ -457,13 +458,37 @@ model PlanillaProduccion {
   creado_en     DateTime         @default(now())
   actualizado_en DateTime        @default(now())
   guardada_en   DateTime?
+  /// Estación de trabajo que completa la planilla (diseño.md §17): una planilla por estación + tipo + día.
+  estacion_trabajo_id String @db.Uuid
 
-  filas     PlanillaFila[]
-  versiones PlanillaVersion[]
+  estacion_trabajo EstacionTrabajo   @relation(fields: [estacion_trabajo_id], references: [id], onDelete: Restrict)
+  filas            PlanillaFila[]
+  versiones        PlanillaVersion[]
+  operarios_planilla PlanillaOperario[]
 
-  @@unique([area, estacion, fecha])
+  @@unique([estacion_trabajo_id, estacion, fecha])
+  @@index([estacion_trabajo_id])
   @@index([fecha])
   @@map("planilla_produccion")
+}
+
+// Operarios (personas) que figuran en una planilla. `usuario_id` es null en los nombres históricos de antes de las
+// estaciones (texto libre); `bloqueado`: no se pueden quitar al completarla (solo técnica/admin al corregir).
+// `planilla_produccion.operarios` (String[]) guarda la copia «Nombre Apellido» para registros e indicadores.
+model PlanillaOperario {
+  id          String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  planilla_id String  @db.Uuid
+  usuario_id  String? @db.Uuid
+  nombre      String
+  bloqueado   Boolean @default(false)
+  orden       Int     @default(0)
+
+  planilla PlanillaProduccion @relation(fields: [planilla_id], references: [id], onDelete: Cascade)
+  usuario  Usuario?           @relation(fields: [usuario_id], references: [id], onDelete: SetNull)
+
+  @@unique([planilla_id, usuario_id])
+  @@index([usuario_id])
+  @@map("planilla_operario")
 }
 
 // Una fila = un pedido trabajado. `pedido_codigo` es el texto cargado (mayúsculas);
@@ -573,6 +598,7 @@ model EstacionTrabajo {
   estado    EstadoProduccion?         @relation(fields: [estado_id], references: [id], onDelete: Restrict)
   planillas EstacionTrabajoPlanilla[]
   usuarios  UsuarioEstacionTrabajo[]
+  planillasProduccion PlanillaProduccion[]
 
   @@index([estado_id])
   @@map("estacion_trabajo")

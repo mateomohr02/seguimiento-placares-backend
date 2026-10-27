@@ -2,8 +2,8 @@
 // con el estilo de las planillas de papel (diseño.md §14). Solo corre contra `Neostone_test`.
 //   npm run termolaminado:sembrar
 // Reemplaza todas las planillas (y sus fotos y versiones) de 2026-10-05 al 2026-10-16. Si la lista de
-// operarios de termolaminado1 está vacía, la completa con Fabián y Carlos; también deja a termolaminado1 con su estado
-// "Listo Termolaminado" y las tres planillas, y siembra la planificación (pedidos y reclamos) de ejemplo.
+// estación de trabajo termolaminado1 no existe la crea; la deja con su estado
+// "Listo Termolaminado" y las tres planillas (operarios históricos Fabián y Carlos), y siembra la planificación (pedidos y reclamos) de ejemplo.
 // Las fotos de PVC son imágenes de relleno.
 import { Prisma, type PlanillaEstacion } from "@prisma/client";
 import { deflateSync, crc32 } from "node:zlib";
@@ -12,7 +12,8 @@ import { prisma } from "../src/config/prisma";
 const DESDE = "2026-10-05";
 const HASTA = "2026-10-16";
 const AREA = "TERMOLAMINADO";
-const USUARIO = "termolaminado1";
+const ESTACION_TRABAJO = "termolaminado1";
+const USUARIO = "termolaminado1"; // autor que queda en creado_por / modificado_por de lo sembrado
 
 // Generador pseudoaleatorio con semilla fija (la siembra es repetible).
 let semilla = 20261019;
@@ -152,28 +153,24 @@ async function main() {
     process.exit(1);
   }
 
-  // Configuración de termolaminado1: sus planillas, su estado de producción y sus operarios (si no los tiene).
-  // (Desde 20261028120000_estaciones_trabajo termolaminado1 es una estación y su usuario queda inactivo: esto sigue
-  // sembrando la configuración vieja, que solo usa el pool de operarios hasta la fase 2.)
-  const usuario = await prisma.usuario.findFirst({ where: { nombre: USUARIO }, select: { id: true } });
-  if (!usuario) {
-    console.error(`No existe el usuario ${USUARIO} en la base de prueba. Crealo primero (npm run usuario:sql).`);
-    process.exit(1);
-  }
-  if ((await prisma.usuarioOperario.count({ where: { usuario_id: usuario.id } })) === 0) {
-    await prisma.usuarioOperario.createMany({ data: ["Fabián", "Carlos"].map((nombre, orden) => ({ usuario_id: usuario.id, nombre, orden })) });
-  }
-  const operarios = (await prisma.usuarioOperario.findMany({ where: { usuario_id: usuario.id }, orderBy: { orden: "asc" } })).map((o) => o.nombre);
+  // Estación de trabajo termolaminado1 (diseño.md §17): las tres planillas y el estado "Listo Termolaminado". Los
+  // operarios de las planillas sembradas son nombres históricos (sin usuario, bloqueados), como los de antes de las estaciones.
   for (const [orden, [nombre, color]] of ([["Listo Termolaminado", "#16a34a"], ["Listo Mecanizado", "#2563eb"]] as const).entries()) {
     await prisma.estadoProduccion.upsert({ where: { nombre }, update: { color }, create: { nombre, color, orden } });
   }
   const listoTermo = await prisma.estadoProduccion.findUniqueOrThrow({ where: { nombre: "Listo Termolaminado" } });
-  if (!(await prisma.usuarioEstadoProduccion.findUnique({ where: { usuario_id: usuario.id } }))) {
-    await prisma.usuarioEstadoProduccion.create({ data: { usuario_id: usuario.id, estado_id: listoTermo.id } });
+  let estacionTrabajo = await prisma.estacionTrabajo.findFirst({ where: { nombre: { equals: ESTACION_TRABAJO, mode: "insensitive" } } });
+  if (!estacionTrabajo) {
+    estacionTrabajo = await prisma.estacionTrabajo.create({ data: { nombre: ESTACION_TRABAJO, estado_id: listoTermo.id } });
   }
-  for (const estacion of ["LIJADO", "ENCOLADO", "PVC"] as PlanillaEstacion[]) {
-    await prisma.usuarioPlanilla.upsert({ where: { usuario_id_estacion: { usuario_id: usuario.id, estacion } }, update: {}, create: { usuario_id: usuario.id, estacion } });
+  for (const planilla of ["LIJADO", "ENCOLADO", "PVC"] as PlanillaEstacion[]) {
+    await prisma.estacionTrabajoPlanilla.upsert({
+      where: { estacion_trabajo_id_planilla: { estacion_trabajo_id: estacionTrabajo.id, planilla } },
+      update: {},
+      create: { estacion_trabajo_id: estacionTrabajo.id, planilla },
+    });
   }
+  const operarios = ["Fabián", "Carlos"];
 
   const dias = diasHabiles(DESDE, HASTA);
   const reales = await prisma.pedido.findMany({
@@ -235,13 +232,16 @@ async function main() {
       if (delDia.length === 0) continue;
       const borrador = d === ultimoDia; // la última planilla de cada estación queda como borrador
       const cierre = new Date(`${fecha}T20:30:00Z`);
+      const elegidos = rnd() < 0.5 ? operarios : [elegir(operarios)];
       const creada = await prisma.planillaProduccion.create({
         data: {
           area: AREA,
           estacion,
+          estacion_trabajo_id: estacionTrabajo.id,
           fecha: new Date(`${fecha}T00:00:00Z`),
           estado: borrador ? "BORRADOR" : "GUARDADA",
-          operarios: rnd() < 0.5 ? operarios : [elegir(operarios)],
+          operarios: elegidos,
+          operarios_planilla: { create: elegidos.map((nombre, orden) => ({ nombre, bloqueado: true, orden })) },
           creado_por: USUARIO,
           modificado_por: USUARIO,
           creado_en: new Date(`${fecha}T09:10:00Z`),
@@ -316,7 +316,7 @@ async function main() {
 
   await sembrarPlanificacion(listoTermo.id);
 
-  console.log(`Sembrado: ${planillas} planillas, ${registros} registros, ${fotos} fotos (${DESDE} a ${HASTA}). Operarios del área: ${operarios.join(", ")}.`);
+  console.log(`Sembrado: ${planillas} planillas, ${registros} registros, ${fotos} fotos (${DESDE} a ${HASTA}). Estación de trabajo: ${ESTACION_TRABAJO}.`);
 }
 
 main()
