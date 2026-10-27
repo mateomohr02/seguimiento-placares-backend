@@ -91,6 +91,8 @@ app/backend/
 │       ├── texturas-3d/        # Texturas de los materiales de las escenas 3D, por catálogo (copiadas de la carpeta de TeoWin a la base)
 │       ├── planillas/          # Planillas de producción de Termolaminado (Lijado, Encolado, PVC): borrador/guardada, versiones, fotos, operarios, tabla, indicadores y trazabilidad (regla 11)
 │       ├── planificacion/      # Planificación semanal (pedidos y reclamos) de Termolaminado cargada por sistema por técnica, con el marcado de estados de producción por fila (regla 11)
+│       ├── usuarios/           # Alta y edición de usuarios (personas) desde la app (regla 12)
+│       ├── estaciones-trabajo/ # Estaciones de trabajo: planillas, estado productivo y usuarios (regla 12)
 │       ├── auth/                # Login por PIN, sesión (token firmado), middlewares autenticar / requierePermiso y claves de permiso
 │       └── sync/                # Las queries de solo-lectura contra TeoWin + agrupar-despiece.ts (cuántas piezas físicas es cada fila)
 ├── scripts/
@@ -241,16 +243,20 @@ Campos comunes: `id` (UUID), `nombre`, `nombre_archivo`, `tamano`, `contenido` (
 
 ### Usuarios, roles y permisos (tablas aparte)
 
-Cuatro tablas más, también por migración **solo aditiva** (`20261008120000_usuarios_roles_permisos`, con `down.sql`). Se administran **directo en la base**; no hay pantalla.
+Cuatro tablas más, también por migración **solo aditiva** (`20261008120000_usuarios_roles_permisos`, con `down.sql`). Los roles y permisos se administran **directo en la base**; los usuarios, **desde la app** (técnica, regla 12).
 
 | Tabla | Campos | Para qué |
 |---|---|---|
 | `rol` | `id`, `nombre` (único), `descripcion` | Los roles: `admin`, `tecnica`, `fabrica`, `gerencia` |
 | `permiso` | `clave` (PK), `descripcion` | Las funcionalidades (ej. `piezas.marcar`) |
 | `rol_permiso` | `rol_id`, `permiso_clave` (PK compuesta) | **Qué funcionalidades tiene cada rol** |
-| `usuario` | `id`, `nombre` (único), `pin` (único, texto plano), `rol_id`, `activo`, `creado_en`, `ultimo_acceso` | Un usuario = una persona o una estación de trabajo |
+| `usuario` | `id`, `nombre`, `apellido` (default `''`), `pin` (único, texto plano), `rol_id`, `activo`, `creado_en`, `ultimo_acceso` | Un usuario = **una persona** (desde `20261028120000_estaciones_trabajo`). Único por `(lower(nombre), lower(apellido))` (índice de expresión `usuario_nombre_apellido_ci_key`, a mano en la migración) |
+| `estacion_trabajo` | `id`, `nombre` (único sin distinguir mayúsculas: `estacion_trabajo_nombre_ci_key`), `activa`, `creado_en`, `estado_id` (nullable → `estado_produccion`) | Estación de trabajo (termolaminado1, mecanizado1…), sin login |
+| `estacion_trabajo_planilla` | `estacion_trabajo_id`, `planilla` (`LIJADO`/`ENCOLADO`/`PVC`) (PK compuesta) | Planillas que completan los operarios de la estación |
+| `usuario_estacion_trabajo` | `usuario_id`, `estacion_trabajo_id` (PK compuesta) | Usuario ↔ estación, muchos a muchos |
+| `planilla_operario` | `id`, `planilla_id` (→ `planilla_produccion`, cascade), `usuario_id` (nullable → `usuario`, set null), `nombre`, `bloqueado`, `orden`; único `(planilla_id, usuario_id)` | Operarios (personas) que figuran en cada planilla (fase 2); `usuario_id` null = nombre histórico de antes de las estaciones |
 
-Un usuario no se borra: se le pone `activo = false`. Detalle de qué permite cada rol en la [regla 9](#9-usuarios-roles-y-permisos).
+Un usuario no se borra: se le pone `activo = false`; una estación tampoco (`activa = false`). Detalle de qué permite cada rol en la [regla 9](#9-usuarios-roles-y-permisos) y de usuarios/estaciones en la regla 12. Las tablas viejas `usuario_planilla`, `usuario_estado_produccion` y `usuario_operario` **se conservan sin uso** (desde la fase 2 el código ya no las lee ni escribe; `usuario_estado_produccion` se vació).
 
 ### Estados (el campo `estado` de cada tabla)
 
@@ -374,27 +380,27 @@ Antes había botones y endpoints manuales para finalizar módulos y pedidos y pa
 
 Detalle completo en `diseño.md` §14. Lo que hay que tener presente al tocar el módulo `planillas`:
 
-- **Una planilla por estación y día** (`LIJADO`, `ENCOLADO`, `PVC`; única por `area + estacion + fecha`). El formulario manda siempre el estado completo con `PUT /planillas/dia/:estacion/:fecha` (upsert): sirve para el guardado automático del borrador (`estado: BORRADOR`) y para cerrarla o corregirla (`estado: GUARDADA`). Las filas llevan su `id` una vez creadas; las que no se mandan se quitan con **borrado lógico** (`planilla_fila.eliminado_en`: se conservan con sus fotos y todas las consultas las ignoran; la versión previa guarda `fotos_lista` con los datos de sus fotos).
-- **Corregir una `GUARDADA`** guarda antes la versión previa en `planilla_version` (con quién la guardó/reemplazó y cuándo). Una `GUARDADA` no vuelve a `BORRADOR` (`409`). Un `BORRADOR` acepta filas incompletas; al guardar, cada fila necesita pedido, hora de inicio y cantidad (en PVC, mesa chica y/o grande).
+- **Una planilla por estación de trabajo, tipo y día** (tipo = `LIJADO`, `ENCOLADO`, `PVC`; única por `estacion_trabajo_id + estacion + fecha`; `planilla_produccion.area` se conserva). El formulario manda siempre el estado completo con `PUT /planillas/dia/:estacionTrabajoId/:planilla/:fecha` (upsert): sirve para el guardado automático del borrador (`estado: BORRADOR`) y para cerrarla o corregirla (`estado: GUARDADA`). Las filas llevan su `id` una vez creadas; las que no se mandan se quitan con **borrado lógico** (`planilla_fila.eliminado_en`: se conservan con sus fotos y todas las consultas las ignoran; la versión previa guarda `fotos_lista` con los datos de sus fotos).
+- **Corregir una `GUARDADA`** guarda antes la versión previa en `planilla_version` (con quién la guardó/reemplazó y cuándo). Una `GUARDADA` no vuelve a `BORRADOR` (`409`). Un `BORRADOR` acepta filas incompletas; al guardar (`GUARDADA`) tiene que figurar **al menos un operario** (`400`, también para técnica/admin; el borrador puede estar vacío) y cada fila necesita pedido, hora de inicio y cantidad (en PVC, mesa chica y/o grande).
 - **PVC**: `cantidad_piezas` = `mesa_chica + mesa_grande`, calculada por el backend; `colores` en mayúsculas y sin puntos; solo las filas de PVC aceptan fotos (hasta 12 por fila, JPG/PNG/WEBP por firma, máx. 8 MB, `bytea`, borrado lógico).
 - **N° de pedido**: texto libre en mayúsculas; si coincide exactamente con un pedido sincronizado se guarda también `pedido_id`.
-- **Configuración por usuario** (la hace técnica, `planillas.configurar`): `usuario_planilla` (planillas que completa; `PUT /planillas/dia/...` y las fotos devuelven `403` si la estación no está asignada), `usuario_estado_produccion` (el estado que marca en la planificación; un estado puede repetirse entre usuarios) y `usuario_operario` (sus operarios). La sesión (`GET /auth/me`) devuelve `planillas`.
-- **Operarios**: los de **su estación** (`usuario_operario`); en cada planilla se eligen a mano (`operarios` en el `PUT`, deben ser los del usuario o estar ya en la planilla) y se guardan como nombre, así que cambiar la lista no altera las planillas existentes. **Preselección**: `GET /planillas/operarios` devuelve también `predeterminados` por estación (`usuario_planilla.operarios_predeterminados`): lo último que el usuario dejó elegido en esa estación mientras completaba una planilla (borrador o cierre; corregir una guardada no lo cambia) o, sin historial o si marcó a todos o a ninguno (`null`), todos sus operarios. La configuración que guarda técnica (`PUT /planillas/accesos/:usuarioId`) conserva estos valores de las estaciones que siguen asignadas.
+- **Acceso por estación de trabajo** (regla 12; la configura técnica con `planillas.configurar` en `/api/estaciones-trabajo`; `services/acceso-planillas.ts`): **completar** (`PUT /dia/...`, subir/borrar fotos) exige `planillas.completar` y además ser **miembro activo** de esa estación (activa y con ese tipo de planilla) o tener `planillas.configurar` (técnica/admin abren y corrigen planillas de cualquier estación, sin sumarse si no son miembros); si no, `403`. `GET /dia/...` pide `planillas.ver` y la misma pertenencia; estación inexistente `404`; estación sin ese tipo, `400` (para quien tiene `configurar`) o `403`; no se crean planillas nuevas en una estación inactiva (`409`; las existentes se pueden abrir con `configurar`). La sesión (`GET /auth/me`) devuelve `planillas` (tipos distintos) y `estaciones`. La vieja configuración por usuario (`/planillas/accesos`, `usuario_planilla`, `usuario_estado_produccion`) **se quitó**.
+- **Operarios por estación** (`planilla_operario`; `planilla_produccion.operarios` String[] sigue llenándose con la copia «Nombre Apellido» para registros e indicadores). `GET`/`PUT` devuelven `estacion_trabajo {id, nombre}`, `operarios [{usuario_id, nombre, bloqueado}]`, `operarios_disponibles [{usuario_id, nombre}]` (personas activas de la estación más las ya incluidas) y `puede_cambiar_bloqueados` (`planillas.configurar`). El `PUT` recibe `operarios: string[]` de `usuario_id` (máx. 40). **Bloqueo**: el usuario de la sesión, si es miembro, se suma solo y queda bloqueado (también quien entra a una planilla ya empezada); los ya bloqueados no se pueden quitar (el backend los conserva aunque falten en el pedido, para que un autoguardado desactualizado no falle) salvo con `puede_cambiar_bloqueados`; los elegidos por otro que no entraron (no bloqueados) sí se pueden quitar. Corrigiendo una `GUARDADA`, técnica/admin que también son miembros no se suman solos (cambian todo). Los nombres históricos (sin usuario) se conservan siempre. Un operario nuevo debe ser miembro activo de la estación (`400` si no existe, está dado de baja o no es de la estación). **Preselección** (planilla que todavía no existe: `GET` devuelve la planilla «virtual» con `id: null`, `estado: "BORRADOR"`, `filas: []`, `versiones: []`): los operarios de la última planilla **del mismo tipo** (guardada o borrador, la de fecha más reciente) de esa estación en la que figuró el usuario de la sesión; se descartan los dados de baja y los que ya no están en la estación; los preseleccionados distintos de la sesión no están bloqueados. Se eliminó `GET /planillas/operarios`.
 - **Zona horaria**: el backend usa UTC para «hoy» (rango por defecto de registros/indicadores y semana por defecto de la planificación); el frontend manda sus fechas locales. Ver `diseño.md` §14.6.
-- **Planificación semanal por sistema** (`planificacion_item`, `planificacion_marca`, `estado_produccion`): técnica (`documentacion.gestionar`) carga a mano las filas de pedidos y reclamos de cada semana (lunes); quien tiene un estado de producción asignado marca/desmarca ese estado en cada fila (`PUT /planificacion/items/:id/marca`). Ver con `documentacion.ver`. Ya no hay carga de PDF/imagen.
-- **Visibilidad de registros**: el rol `fabrica` solo ve los registros de las planillas que tiene asignadas (`GET /planillas/registros`, `/dia/...`, `/:id`, `/versiones/:id`, `/fotos/:id`, `/trazabilidad`, sugerencias y colores); técnica, gerencia y admin ven todas. Una estación no visible responde `403`; sin planillas asignadas, el listado queda vacío y la trazabilidad responde `403` (`estacionesVisibles` en `planillas.router.ts`).
+- **Planificación semanal por sistema** (`planificacion_item`, `planificacion_marca`, `estado_produccion`): técnica (`documentacion.gestionar`) carga a mano las filas de pedidos y reclamos de cada semana (lunes); el estado de producción lo tiene la **estación de trabajo**: cualquier usuario de una estación activa con estado marca/desmarca ese estado en cada fila (`PUT /planificacion/items/:id/marca`); si está en varias estaciones con estados distintos puede marcar cualquiera (`estado_id` en el body). Ver con `documentacion.ver`. Ya no hay carga de PDF/imagen.
+- **Visibilidad de registros**: el rol `fabrica` solo ve las planillas (y sus registros, fotos, versiones, trazabilidad, sugerencias y colores) de **sus estaciones de trabajo activas y de los tipos que cada una tiene** (`whereVisible` en `services/acceso-planillas.ts`); técnica, gerencia y admin ven todas. Una planilla/estación no visible responde `403`; sin estaciones, el listado queda vacío y la trazabilidad responde `403`. Los registros y la trazabilidad incluyen `estacion_trabajo {id, nombre}` (`estacion` sigue siendo el tipo) y `GET /planillas/registros` filtra por `estacion_trabajo_id`.
 - Esta feature **no lee ni escribe en TeoWin**. Permisos: `planillas.completar`, `planillas.ver`, `planillas.indicadores`, `planillas.configurar` (tabla de la regla 9).
 
 ### 9. Usuarios, roles y permisos
 
 Todo `/api/*` exige sesión salvo `GET /api/health` y `POST /api/auth/login`. Cada ruta, además, declara el permiso que necesita (`requierePermiso(PERMISOS.…)` en su router).
 
-- **Login**: `POST /api/auth/login` con `{ "pin": "123456" }`. El PIN identifica al usuario. Devuelve `{ token, expiraEnSegundos, usuario: { nombre, rol } }`; el frontend guarda el token en una cookie httpOnly y lo reenvía como `Authorization: Bearer <token>`.
+- **Login**: `POST /api/auth/login` con `{ "pin": "123456" }`. El PIN identifica al usuario. Devuelve `{ token, expiraEnSegundos, usuario }` (`usuario` con la misma forma que `GET /auth/me`); el frontend guarda el token en una cookie httpOnly y lo reenvía como `Authorization: Bearer <token>`.
 - **PIN**: numérico de 4 a 10 dígitos (se recomiendan 6) y único. **Se guarda en texto plano** en `usuario.pin` (decisión del usuario; cualquiera con lectura a la base ve los PIN, incluidos los backups).
 - **Sesión**: token firmado con `SESSION_SECRET`, dura `SESSION_HORAS`. Lleva solo el id de usuario y el vencimiento: **el rol y los permisos se leen de la base en cada pedido**, así que una baja (`activo = false`) o un cambio en `rol_permiso` rige de inmediato.
 - **Límite de intentos**: 8 PIN incorrectos en 10 minutos bloquean el login con `429`, por IP y en memoria (se reinicia con el servidor). Como el backend ve la IP del frontend, en la práctica es global.
 - **Errores**: `401` sin sesión válida (falta el token, venció, está alterado o el usuario está inactivo); `403` si el usuario no tiene el permiso.
-- `GET /api/auth/me` devuelve `{ nombre, rol, permisos[] }` (lo usa el frontend para decidir qué mostrar; el backend igual valida cada acción).
+- `GET /api/auth/me` devuelve `{ id, nombre, apellido, rol, permisos[], planillas[], estaciones: [{ id, nombre, planillas[], estado_id }] }` (lo usa el frontend para decidir qué mostrar; el backend igual valida cada acción). `estaciones` son sus estaciones de trabajo activas y `planillas` los tipos distintos de esas estaciones (regla 12).
 
 **Permisos por rol** (la fuente es la tabla `rol_permiso`; esta tabla es la carga inicial de la migración):
 
@@ -407,19 +413,21 @@ Todo `/api/*` exige sesión salvo `GET /api/health` y `POST /api/auth/login`. Ca
 | `documentacion.anotaciones.eliminar` | Borrar anotaciones | ✔ | ✔ | — | — |
 | `documentacion.gestionar` | Subir y eliminar hojas de corte, documentos y planos | ✔ | ✔ | — | — |
 | `ordenes.gestionar` | Agregar, archivar y eliminar órdenes | ✔ | ✔ | — | — |
-| `usuarios.gestionar` | Alta y baja de usuarios (previsto; hoy se hace por base) | ✔ | ✔ | — | — |
+| `usuarios.gestionar` | Alta, edición y baja de usuarios desde la app (`/api/usuarios`, regla 12) | ✔ | ✔ | — | — |
 | `planillas.completar` | Completar, guardar y corregir las planillas de producción de Termolaminado y sus fotos | ✔ | ✔ | ✔ | — |
 | `planillas.ver` | Ver registros, indicadores y trazabilidad de las planillas | ✔ | ✔ | ✔ | ✔ |
 | `planillas.indicadores` | Ver los indicadores de producción de Termolaminado | ✔ | ✔ | — | ✔ |
-| `planillas.configurar` | Configurar estados de producción, planillas y operarios de cada usuario | ✔ | ✔ | — | — |
+| `planillas.configurar` | Configurar el catálogo de estados de producción y las estaciones de trabajo (`/api/estaciones-trabajo`: planillas, estado y usuarios) | ✔ | ✔ | — | — |
 
 La planificación semanal de Termolaminado no tiene permiso propio: usa `documentacion.ver` (ver) y `documentacion.gestionar` (subir y eliminar). Ojo: hoy **todo usuario `fabrica`** recibe `planillas.completar` (no hay un rol solo de Termolaminado).
 
-Los usuarios `fabrica` son las estaciones de trabajo (`cortadora1`, `rover1`, `armado1`, …); `gerencia` queda previsto para un panel de información futuro. Ver `diseño.md` §12 para los motivos.
+Cada usuario es **una persona** (los `fabrica` son operarios); las estaciones de trabajo (`cortadora1`, `termolaminado1`, …) son una entidad aparte sin login (regla 12). `gerencia` queda previsto para un panel de información futuro. Ver `diseño.md` §12 y §17 para los motivos.
 
 #### Alta de usuarios
 
-No hay pantalla: se da de alta desde la base. El script genera el `INSERT`:
+**Desde la app**: técnica (o admin) crea, edita y da de baja usuarios con `/api/usuarios` (pantalla «Usuarios» del frontend). Reglas en la regla 12.
+
+Para emergencias (ej. el primer admin de una base nueva) se puede seguir dando de alta desde la base. El script genera el `INSERT`:
 
 ```powershell
 cd app\backend
@@ -436,6 +444,24 @@ UPDATE usuario SET rol_id = (SELECT id FROM rol WHERE nombre = 'tecnica') WHERE 
 Para cambiar el PIN de alguien: `UPDATE usuario SET pin = '654321' WHERE nombre = 'rover1';` (tiene que ser numérico y único). Para **agregar un permiso nuevo**: insertarlo en `permiso` y asignarlo en `rol_permiso` (también a `admin`: no tiene acceso implícito a todo); el código lo referencia con `requierePermiso`.
 
 > No guardes PIN en archivos del proyecto ni en el historial de git. Evitá pasar PIN reales en la línea de comandos de una máquina compartida (queda en el historial de la terminal).
+
+### 12. Usuarios (personas) y estaciones de trabajo
+
+Feature `operarios por estación de trabajo` (rama `feature/operarios-por-estacion`, fase 1; detalle en `diseño.md` §17). Migración `20261028120000_estaciones_trabajo` (aditiva, con `down.sql`).
+
+- **Usuario = persona**: `nombre`, `apellido`, PIN y rol. Lo crea y administra **técnica desde la app** (`usuarios.gestionar`). El login sigue siendo solo por PIN.
+- **Estación de trabajo** (`estacion_trabajo`): sin login; la crea técnica (`planillas.configurar`). Tiene un estado productivo opcional (del catálogo `estado_produccion`) y las planillas (`LIJADO`, `ENCOLADO`, `PVC`) que pueden completar sus operarios. Nombre único sin distinguir mayúsculas. No se borra: `activa = false`.
+- **Usuario ↔ estación: muchos a muchos** (`usuario_estacion_trabajo`), no obligatorio. Se asigna desde el usuario (`estaciones_ids`) o desde la estación (`usuarios_ids`); en ambos casos la lista **reemplaza** la anterior.
+- **Roles**: técnica puede asignar cualquier rol menos `admin` y no puede editar a un admin (`403`); tampoco ve a los usuarios admin (ni en `GET /usuarios` ni en los `usuarios` de cada estación) ni puede asignarlos a una estación (`403`); los admin que ya estaban asignados a una estación se conservan cuando técnica reemplaza los usuarios. Nadie crea usuarios admin desde la app (ni un admin: `403`); el alta de un admin se hace por base. Solo un admin edita admins.
+- **PIN**: numérico de 4 a 10 dígitos y único entre todos los usuarios (activos o no): `409` si está en uso. **Límite de conflictos**: 5 conflictos de PIN en 10 minutos por usuario que llama (alta o edición) → `429` («Demasiados PIN en uso probados…»), en memoria y reiniciado con el servidor (como el login); el `409` es siempre el mismo mensaje genérico, también cuando el PIN es de un admin, para no revelar PIN probando. Técnica ve los PIN (`GET /usuarios`). **(nombre, apellido)** único sin distinguir mayúsculas (`409`). Nombre obligatorio; **apellido obligatorio al crear** (en `PATCH` solo puede quedar vacío si ya lo estaba, usuarios viejos). Nombre/apellido se guardan sin espacios de más.
+- **Baja**: `activo = false` (cierra su sesión de inmediato). **Nadie puede desactivarse a sí mismo** (`400`) ni **cambiar su propio rol** (`400`; no hay protección de «último admin»).
+- **Sesión**: `planillas` = tipos distintos de las estaciones **activas** del usuario; `estaciones` = esas estaciones. Una estación inactiva no aporta nada.
+- **Planificación**: el usuario puede marcar cualquiera de los estados de sus estaciones activas (`mis_estados`); con más de uno, `PUT /planificacion/items/:id/marca` exige `estado_id` (`400` si falta, `403` si no es de sus estaciones).
+- **Autor registrado**: `creado_por` / `modificado_por` de las planillas, `marcado_por` de la planificación y las fotos guardan ahora `"Nombre Apellido"` (antes solo el nombre).
+- **Limpieza posterior** (`20261030120000_eliminar_usuarios_estacion`, con `down.sql` que no restaura): elimina las filas de `usuario` inactivas, rol `fabrica` y con nombre igual (sin distinguir mayúsculas) al de una estación de trabajo; sus filas en `usuario_planilla`/`usuario_operario`/`usuario_estado_produccion`/`usuario_estacion_trabajo` se borran en cascada y `planilla_operario.usuario_id` pasa a `NULL` (queda el nombre).
+- **Lectura de una planilla guardada** (`GET /planillas/:id`) es solo lectura: no suma al usuario de la sesión a `operarios`; el auto-sumado ocurre en `GET /planillas/dia/...` y `PUT`. `PUT` bloquea la planilla (`FOR UPDATE`): dos `PUT` simultáneos se serializan; `409` distingue «se estaba creando» de «se estaba editando» al mismo tiempo.
+- **Migración de datos**: cada usuario `fabrica` que tenía configuración vieja (`usuario_planilla`, `usuario_estado_produccion` o `usuario_operario`) pasó a ser una estación con el mismo nombre, sus planillas y su estado; su usuario quedó `activo = false` (no se borra; deja de tener login). Las filas de `usuario_operario` **no** se migraron (no son personas con PIN): se conservan.
+- **Fase 2** (migración `20261029120000_planillas_por_estacion`, aditiva, con `down.sql`): `planilla_produccion.estacion_trabajo_id` (backfill: la estación que tiene ese tipo de planilla; si hay varias, la más antigua, con aviso; si ninguna, la migración se cancela), única `(estacion_trabajo_id, estacion, fecha)` en lugar de `(area, estacion, fecha)`, tabla `planilla_operario` (los nombres viejos pasan con `usuario_id` null y `bloqueado = true`) y limpieza de `usuario_estado_produccion` (el estado lo tiene la estación). Detalle en la regla 11.
 
 ---
 
@@ -459,8 +485,28 @@ Base URL en desarrollo: `http://localhost:4000/api`
 
 | Método y ruta | Qué hace | Body / respuesta |
 |---|---|---|
-| `POST /auth/login` | Inicia sesión con el PIN (ruta pública) | body: `{ "pin": "123456" }` → `data`: `{ token, expiraEnSegundos, usuario: { nombre, rol } }`. Errores: `400` (PIN no numérico), `401` (PIN incorrecto o usuario inactivo), `429` (demasiados intentos) |
-| `GET /auth/me` | Quién es el usuario de la sesión y qué puede hacer | `data`: `{ nombre, rol, permisos: string[] }` |
+| `POST /auth/login` | Inicia sesión con el PIN (ruta pública) | body: `{ "pin": "123456" }` → `data`: `{ token, expiraEnSegundos, usuario }` (`usuario` igual que `/auth/me`). Errores: `400` (PIN no numérico), `401` (PIN incorrecto o usuario inactivo), `429` (demasiados intentos) |
+| `GET /auth/me` | Quién es el usuario de la sesión y qué puede hacer | `data`: `{ id, nombre, apellido, rol, permisos: string[], planillas: ("LIJADO"\|"ENCOLADO"\|"PVC")[], estaciones: [{ id, nombre, planillas, estado_id }] }` (solo estaciones activas) |
+
+### Usuarios
+
+Permiso `usuarios.gestionar` (regla 12).
+
+| Método y ruta | Qué hace | Body / respuesta |
+|---|---|---|
+| `GET /usuarios` | Lista los usuarios (activos primero). Técnica no ve los admin | `data`: array de `{ id, nombre, apellido, rol, activo, pin, ultimo_acceso (ISO \| null), estaciones: [{ id, nombre, activa }] }` |
+| `POST /usuarios` | Alta | body: `{ nombre, apellido, pin, rol: "fabrica"\|"tecnica"\|"gerencia"\|"admin", estaciones_ids?: string[] }` → `201`, `data`: el usuario. `400` (validación o estación inexistente), `403` (rol `admin`: nadie crea admins desde la app), `409` (PIN en uso o nombre+apellido repetido) |
+| `PATCH /usuarios/:id` | Edición parcial | body: `{ nombre?, apellido?, pin?, rol?, activo?, estaciones_ids? }` (`estaciones_ids` reemplaza) → `data`: el usuario. `400` (validación, desactivarse a sí mismo), `403` (técnica edita a un admin o deja a alguien admin), `404`, `409` |
+
+### Estaciones de trabajo
+
+Permiso `planillas.configurar` (regla 12).
+
+| Método y ruta | Qué hace | Body / respuesta |
+|---|---|---|
+| `GET /estaciones-trabajo` | Lista las estaciones (activas primero) | `data`: array de `{ id, nombre, activa, planillas: ("LIJADO"\|"ENCOLADO"\|"PVC")[], estado_id \| null, usuarios: [{ id, nombre, apellido, rol, activo }] }` (técnica no ve usuarios admin) |
+| `POST /estaciones-trabajo` | Alta | body: `{ nombre, planillas?: [], estado_id?: string \| null }` → `201`, `data`: la estación. `400` (validación, estado inexistente), `409` (nombre repetido sin distinguir mayúsculas) |
+| `PATCH /estaciones-trabajo/:id` | Edición parcial | body: `{ nombre?, planillas?, estado_id?, activa?, usuarios_ids? }` (`planillas` y `usuarios_ids` reemplazan) → `data`: la estación. `400`, `403` (técnica asigna un admin), `404`, `409` |
 
 ### Salud del servidor
 
@@ -542,30 +588,31 @@ Mismo esquema que las hojas de corte, colgando del pedido.
 
 ### Planillas de Termolaminado
 
-Todas bajo `/api/planillas`. `estacion` es `lijado`, `encolado` o `pvc`; `fecha`, `AAAA-MM-DD`.
+Todas bajo `/api/planillas`. `:planilla` es `lijado`, `encolado` o `pvc` (el tipo); `:estacionTrabajoId` es el UUID de la estación; `fecha`, `AAAA-MM-DD`.
 
 | Método y ruta | Permiso | Qué hace |
 |---|---|---|
-| `GET /planillas/dia/:estacion/:fecha` | `planillas.ver` | La planilla de ese día con sus filas, fotos (metadatos) y versiones; `data: null` si no existe |
-| `PUT /planillas/dia/:estacion/:fecha` | `planillas.completar` | Crea o actualiza con `{ estado: "BORRADOR" \| "GUARDADA", filas: [{ id?, hora_inicio, hora_fin, pedido_codigo, cantidad_piezas, observaciones, colocacion_pvc, perfilado, colores, mesa_chica, mesa_grande }] }`. `400` (datos inválidos, mensaje legible), `409` (una guardada no vuelve a borrador) |
+| `GET /planillas/dia/:estacionTrabajoId/:planilla/:fecha` | `planillas.ver` (+ miembro activo de la estación o `planillas.configurar`) | La planilla de ese día con filas, fotos (metadatos), versiones y operarios (ver regla 11); si todavía no existe, la planilla «virtual» con la preselección (`id: null`) |
+| `PUT /planillas/dia/:estacionTrabajoId/:planilla/:fecha` | `planillas.completar` (+ miembro activo o `planillas.configurar`) | Crea o actualiza con `{ estado: "BORRADOR" \| "GUARDADA", operarios: [usuario_id], filas: [{ id?, hora_inicio, hora_fin, pedido_codigo, cantidad_piezas, observaciones, colocacion_pvc, perfilado, colores, mesa_chica, mesa_grande }] }`. Responde la planilla completa. `400` (datos u operarios inválidos), `403`, `404`, `409` (una guardada no vuelve a borrador; estación inactiva; carrera al crear) |
 | `GET /planillas/:id` · `GET /planillas/versiones/:id` | `planillas.ver` | Detalle de una planilla / una versión previa (`datos`) |
-| `GET /planillas/registros?desde&hasta&estacion&estado&pedido` | `planillas.ver` (+ planilla asignada si es `fabrica`) | Tabla cruda: una fila por registro con `fotos` (cantidad) y `versiones`. Por defecto, los últimos 30 días |
+| `GET /planillas/registros?desde&hasta&estacion&estacion_trabajo_id&estado&pedido` | `planillas.ver` (+ solo sus estaciones si es `fabrica`) | Tabla cruda: una fila por registro con `estacion_trabajo {id, nombre}`, `fotos` (cantidad) y `versiones`; `estacion` es el tipo. Por defecto, los últimos 30 días |
 | `GET /planillas/indicadores?desde&hasta` | `planillas.indicadores` | Por estación, por día y estado de los pedidos del período |
-| `GET /planillas/trazabilidad?pedido=` | `planillas.ver` | Recorrido de un pedido por las tres estaciones |
+| `GET /planillas/trazabilidad?pedido=` | `planillas.ver` | Recorrido de un pedido por los tres tipos de planilla (cada registro con su `estacion_trabajo`) |
 | `GET /planillas/pedidos-sugeridos?q=` · `GET /planillas/colores` | `planillas.ver` | Autocompletado de N° de pedido y de códigos de color |
-| `GET /planillas/accesos` · `PUT /planillas/accesos/:usuarioId` | `planillas.configurar` | Configuración por usuario: `{ estaciones: ["LIJADO","ENCOLADO","PVC"], estado_id, operarios: ["Fabián"] }` |
-| `GET`/`PUT /planillas/estados` | `planillas.configurar` | Catálogo de estados de producción: `{ estados: [{ id?, nombre, color? (#rrggbb) }] }` (`409` si se quita uno asignado o con marcas) |
-| `GET /planillas/operarios` | `planillas.ver` | Los operarios de la estación del usuario: `{ operarios: ["Fabián", "Carlos"] }` |
+| `GET`/`PUT /planillas/estados` | `planillas.configurar` | Catálogo de estados de producción: `{ estados: [{ id?, nombre, color? (#rrggbb) }] }`. Respuesta: `[{ id, nombre, color, estaciones, usuarios, marcas }]` (`estaciones`: cuántas estaciones de trabajo lo tienen, el contador de usos; `usuarios` = `estaciones`, solo por compatibilidad). `409` si se quita uno asignado a estaciones o con marcas |
+
 | `POST /planillas/filas/:filaId/fotos` | `planillas.completar` | **Body: la imagen cruda** (`image/jpeg`, `png` o `webp`). Solo filas de PVC. `201`: `{ id, mime, tamano, creado_en }` |
 | `GET`/`DELETE /planillas/fotos/:fotoId` | `planillas.ver` / `planillas.completar` | Imagen / borrado lógico |
+
+(`GET`/`PUT /planillas/accesos` y `GET /planillas/operarios` se quitaron: ahora son `/estaciones-trabajo` y el bloque `operarios` de la planilla.)
 
 ### Planificación semanal de Termolaminado
 
 | Método y ruta | Permiso | Qué hace |
 |---|---|---|
-| `GET /planificacion?semana=AAAA-MM-DD` | `documentacion.ver` | La semana (por defecto la actual; se normaliza a su lunes): `{ semana_inicio, semanas[], estados[], mi_estado, items[] }`, cada fila con sus `marcas` (estado, quién, cuándo) |
+| `GET /planificacion?semana=AAAA-MM-DD` | `documentacion.ver` | La semana (por defecto la actual; se normaliza a su lunes): `{ semana_inicio, semanas[], estados[], mi_estado, mis_estados[], items[] }` (`mis_estados`: los estados de las estaciones activas del usuario; `mi_estado` = el primero o `null`, por compatibilidad), cada fila con sus `marcas` (estado, quién, cuándo) |
 | `POST /planificacion/items` · `PUT /planificacion/items/:id` · `DELETE /planificacion/items/:id` | `documentacion.gestionar` | Alta, edición y baja lógica de una fila. Body: `{ tipo: "PEDIDOS" \| "RECLAMOS", semana, cliente, n_tw, n_orden, modelo, color, fabrica, fecha_limite, distribuidor, ticket, tipo_reclamo, compromiso, finalizado_en, observaciones }` (hace falta cliente o N° TW) |
-| `PUT /planificacion/items/:id/marca` | `documentacion.ver` + estado asignado | `{ marcado: true \| false }`: marca o quita el estado de producción del usuario en la fila (`403` si no tiene estado asignado) |
+| `PUT /planificacion/items/:id/marca` | `documentacion.ver` + estación con estado | `{ marcado: true \| false, estado_id?: uuid }`: marca o quita uno de los estados de las estaciones del usuario en la fila. `estado_id` es obligatorio si tiene más de uno (`400`); `403` si ninguna de sus estaciones tiene estado o si `estado_id` no es de sus estaciones |
 
 ### Piezas
 

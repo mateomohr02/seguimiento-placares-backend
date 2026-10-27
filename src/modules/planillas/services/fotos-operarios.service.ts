@@ -48,15 +48,15 @@ export async function eliminarFoto(id: string) {
   await prisma.planillaFoto.update({ where: { id }, data: { eliminado_en: new Date() } });
 }
 
-// Estación de la planilla a la que pertenece una fila o una foto (para exigir el acceso asignado).
-export async function estacionDeFila(filaId: string) {
-  const f = await prisma.planillaFila.findUnique({ where: { id: filaId }, select: { planilla: { select: { estacion: true } } } });
+// Estación de trabajo y tipo de la planilla a la que pertenece una fila o una foto (para exigir el acceso por estación).
+export async function ubicacionDeFila(filaId: string) {
+  const f = await prisma.planillaFila.findUnique({ where: { id: filaId }, select: { planilla: { select: { estacion: true, estacion_trabajo_id: true } } } });
   if (!f) throw new AppError("Fila no encontrada.", 404);
-  return f.planilla.estacion;
+  return f.planilla;
 }
 
-export async function estacionDeFoto(fotoId: string) {
-  const f = await prisma.planillaFoto.findUnique({ where: { id: fotoId }, select: { fila: { select: { planilla: { select: { estacion: true } } } } } });
+export async function ubicacionDeFoto(fotoId: string) {
+  const f = await prisma.planillaFoto.findUnique({ where: { id: fotoId }, select: { fila: { select: { planilla: { select: { estacion: true, estacion_trabajo_id: true } } } } } });
   if (!f) throw new AppError("Foto no encontrada.", 404);
-  return f.fila.planilla.estacion;
+  return f.fila.planilla;
 }

@@ -12,7 +12,7 @@ const FECHA_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 export function parseEstacion(raw: string): Estacion {
   const e = raw.toUpperCase();
-  if (!(ESTACIONES as readonly string[]).includes(e)) throw new AppError("Estación inválida (lijado, encolado o pvc).", 400);
+  if (!(ESTACIONES as readonly string[]).includes(e)) throw new AppError("Tipo de planilla inválido (lijado, encolado o pvc).", 400);
   return e as Estacion;
 }
 
@@ -57,8 +57,8 @@ export type FilaInput = z.infer<typeof FilaSchema>;
 
 export const PlanillaBodySchema = z.object({
   estado: z.enum(["BORRADOR", "GUARDADA"]),
-  /** Operarios que trabajaron en esta planilla (elegidos a mano de la lista del área). */
-  operarios: z.array(z.string().trim().min(1).max(60)).max(10).default([]),
+  /** `usuario_id` de las personas que trabajaron en esta planilla (miembros de la estación). */
+  operarios: z.array(z.string().uuid("Un operario no es válido.")).max(40).default([]),
   filas: z.array(FilaSchema).max(60),
 });
 export type PlanillaBody = z.infer<typeof PlanillaBodySchema>;

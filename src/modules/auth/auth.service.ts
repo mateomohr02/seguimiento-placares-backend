@@ -1,6 +1,7 @@
 import { prisma } from "../../config/prisma";
 import { AppError } from "../../utils/AppError";
 import { crearToken, SESION_SEGUNDOS } from "./sesion";
+import { cargarUsuarioDeSesion } from "./sesion-usuario";
 
 // Límite de intentos fallidos por IP (en memoria, se reinicia con el servidor):
 // un PIN de 6 dígitos se adivina por fuerza bruta si no se frena. Ojo: el backend
@@ -31,15 +32,13 @@ function registrarFallo(ip: string) {
 
 export async function loginPorPin(pin: string, ip: string) {
   chequearBloqueo(ip);
-  const u = await prisma.usuario.findUnique({
-    where: { pin },
-    select: { id: true, nombre: true, activo: true, rol: { select: { nombre: true } } },
-  });
-  if (!u || !u.activo) {
+  const u = await cargarUsuarioDeSesion({ pin });
+  if (!u) {
     registrarFallo(ip);
     throw new AppError("PIN incorrecto.", 401);
   }
   fallos.delete(ip);
   await prisma.usuario.update({ where: { id: u.id }, data: { ultimo_acceso: new Date() } });
-  return { token: crearToken(u.id), expiraEnSegundos: SESION_SEGUNDOS, usuario: { nombre: u.nombre, rol: u.rol.nombre } };
+  // `usuario` tiene la misma forma que GET /auth/me.
+  return { token: crearToken(u.id), expiraEnSegundos: SESION_SEGUNDOS, usuario: u };
 }

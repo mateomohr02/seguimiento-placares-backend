@@ -1,17 +1,13 @@
 import type { RequestHandler } from "express";
-import { prisma } from "../../config/prisma";
 import { AppError } from "../../utils/AppError";
 import { catchAsync } from "../../utils/catchAsync";
 import type { Permiso } from "./permisos";
 import { verificarToken } from "./sesion";
+import { cargarUsuarioDeSesion, type UsuarioDeSesion } from "./sesion-usuario";
 
-export interface UsuarioAutenticado {
-  id: string;
-  nombre: string;
-  rol: string;
-  permisos: string[];
-  /** Planillas de Termolaminado que puede completar (las asigna técnica). */
-  planillas: string[];
+export interface UsuarioAutenticado extends UsuarioDeSesion {
+  /** "Nombre Apellido": lo que queda registrado como autor (creado_por, modificado_por, marcado_por…). */
+  nombre_completo: string;
 }
 
 declare module "express-serve-static-core" {
@@ -22,27 +18,20 @@ declare module "express-serve-static-core" {
 
 const SESION_INVALIDA = "Sesión inválida o vencida. Ingresá tu PIN.";
 
-// Lee el token (Authorization: Bearer ...), lo verifica y carga usuario, rol y
-// permisos desde la base. 401 si falta, venció, es inválido o el usuario está inactivo.
+export const nombreCompleto = (u: { nombre: string; apellido: string }) => [u.nombre, u.apellido].filter(Boolean).join(" ");
+
+// Lee el token (Authorization: Bearer ...), lo verifica y carga usuario, rol, permisos y estaciones de trabajo
+// activas desde la base. 401 si falta, venció, es inválido o el usuario está inactivo.
 export const autenticar: RequestHandler = catchAsync(async (req, _res, next) => {
   const header = req.headers.authorization ?? "";
   const token = header.startsWith("Bearer ") ? header.slice(7).trim() : "";
   const uid = token ? verificarToken(token) : null;
   if (!uid) throw new AppError(SESION_INVALIDA, 401);
 
-  const u = await prisma.usuario.findUnique({
-    where: { id: uid },
-    select: {
-      id: true,
-      nombre: true,
-      activo: true,
-      rol: { select: { nombre: true, permisos: { select: { permiso_clave: true } } } },
-      planillas: { select: { estacion: true } },
-    },
-  });
-  if (!u || !u.activo) throw new AppError(SESION_INVALIDA, 401);
+  const u = await cargarUsuarioDeSesion({ id: uid });
+  if (!u) throw new AppError(SESION_INVALIDA, 401);
 
-  req.usuario = { id: u.id, nombre: u.nombre, rol: u.rol.nombre, permisos: u.rol.permisos.map((p) => p.permiso_clave), planillas: u.planillas.map((p) => p.estacion) };
+  req.usuario = { ...u, nombre_completo: nombreCompleto(u) };
   next();
 });
 
