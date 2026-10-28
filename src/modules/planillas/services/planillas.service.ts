@@ -16,6 +16,8 @@ import { esMiembro, exigirAcceso, exigirVisible, puedeConfigurar, tiposVisibles,
 
 // Planillas de producción de Termolaminado (diseño.md §14 y §17): una por estación de trabajo, tipo y día.
 
+const pedidoTandaSelect = { id: true, orden: true, pedido_codigo: true, pedido_id: true, cantidad_piezas: true } satisfies Prisma.PlanillaFilaPedidoSelect;
+
 const filaSelect = {
   id: true,
   orden: true,
@@ -28,8 +30,10 @@ const filaSelect = {
   colocacion_pvc: true,
   perfilado: true,
   colores: true,
-  mesa_chica: true,
-  mesa_grande: true,
+  mesa_tamano: true,
+  mesa_cantidad: true,
+  // Solo PVC (tandas): los pedidos con las piezas de cada uno. En Lijado y Encolado queda vacío.
+  pedidos: { select: pedidoTandaSelect, orderBy: { orden: "asc" } },
   fotos: {
     where: { eliminado_en: null },
     select: { id: true, mime: true, tamano: true, creado_en: true },
@@ -227,24 +231,50 @@ export async function getVersion(u: UsuarioAutenticado, id: string) {
   };
 }
 
-const filaVacia = (f: FilaInput) =>
-  !f.pedido_codigo && !f.hora_inicio && !f.hora_fin && f.cantidad_piezas === null && !f.observaciones &&
-  !f.colocacion_pvc && !f.perfilado && !f.colores && f.mesa_chica === null && f.mesa_grande === null;
+// PVC: una fila es una tanda (mesas + pedidos). Lijado y Encolado: un pedido.
+const filaVacia = (estacion: Estacion, f: FilaInput) =>
+  !f.hora_inicio && !f.hora_fin && !f.observaciones &&
+  (estacion === "PVC"
+    ? !f.colocacion_pvc && !f.perfilado && !f.colores && !f.mesa_tamano && f.mesa_cantidad === null && f.pedidos.length === 0
+    : !f.pedido_codigo && f.cantidad_piezas === null && !f.colocacion_pvc && !f.perfilado && !f.colores);
+
+/** Descarta en silencio los pedidos de tanda totalmente vacíos (sin código y sin piezas); en Lijado/Encolado no hay pedidos. */
+function limpiarFilas(estacion: Estacion, filas: FilaInput[]): FilaInput[] {
+  return filas.map((f) => ({
+    ...f,
+    pedidos: estacion === "PVC" ? f.pedidos.filter((p) => p.pedido_codigo || (p.cantidad_piezas ?? 0) > 0) : [],
+  }));
+}
 
 const aMinutos = (h: string) => Number(h.slice(0, 2)) * 60 + Number(h.slice(3, 5));
 
 // Reglas al cerrar la planilla (BORRADOR acepta filas incompletas).
 function validarGuardada(estacion: Estacion, filas: FilaInput[]) {
-  if (filas.length === 0) throw new AppError("La planilla no tiene filas: cargá al menos un pedido.", 400);
+  const pvc = estacion === "PVC";
+  if (filas.length === 0) throw new AppError(pvc ? "La planilla no tiene tandas: cargá al menos una." : "La planilla no tiene filas: cargá al menos un pedido.", 400);
   filas.forEach((f, i) => {
     const n = `Fila ${i + 1}: `;
-    if (filaVacia(f)) throw new AppError(`${n}está vacía; completala o quitala.`, 400);
-    if (!f.pedido_codigo) throw new AppError(`${n}falta el N° de pedido.`, 400);
+    if (filaVacia(estacion, f)) throw new AppError(`${n}está vacía; completala o quitala.`, 400);
+    if (!pvc && !f.pedido_codigo) throw new AppError(`${n}falta el N° de pedido.`, 400);
     if (!f.hora_inicio) throw new AppError(`${n}falta la hora de inicio.`, 400);
-    if (estacion === "PVC" && f.mesa_chica === null && f.mesa_grande === null) {
-      throw new AppError(`${n}cargá las piezas en mesa chica y/o mesa grande.`, 400);
+    if (!pvc) {
+      if (f.cantidad_piezas === null) throw new AppError(`${n}falta la cantidad de piezas.`, 400);
+      return;
     }
-    if (estacion !== "PVC" && f.cantidad_piezas === null) throw new AppError(`${n}falta la cantidad de piezas.`, 400);
+    if (!f.mesa_tamano) throw new AppError(`${n}falta el tamaño de las mesas (chica o grande).`, 400);
+    if (f.mesa_cantidad === null || f.mesa_cantidad < 1) throw new AppError(`${n}la cantidad de mesas tiene que ser al menos 1.`, 400);
+    if (f.pedidos.length === 0) throw new AppError(`${n}cargá al menos un pedido con sus piezas.`, 400);
+    const vistos = new Set<string>();
+    f.pedidos.forEach((p, j) => {
+      if (!p.pedido_codigo) throw new AppError(`${n}al pedido ${j + 1} le falta el N° de pedido.`, 400);
+      if (p.cantidad_piezas === null || p.cantidad_piezas < 1) {
+        throw new AppError(`${n}el pedido ${p.pedido_codigo} tiene que llevar al menos 1 pieza.`, 400);
+      }
+      if (vistos.has(p.pedido_codigo)) {
+        throw new AppError(`${n}el pedido ${p.pedido_codigo} está repetido en la tanda; cargalo una sola vez con el total de piezas.`, 400);
+      }
+      vistos.add(p.pedido_codigo);
+    });
   });
 }
 
@@ -256,21 +286,22 @@ function validarHoras(filas: FilaInput[]) {
   });
 }
 
-// Deja en cada fila solo los campos de su estación; en PVC la cantidad de piezas es mesa chica + mesa grande.
+// Deja en cada fila solo los campos de su estación. En PVC la fila es una tanda: pedido_codigo '' y cantidad_piezas = suma
+// de las piezas de sus pedidos (mesa_chica / mesa_grande quedaron sin uso).
 function normalizarFila(estacion: Estacion, f: FilaInput) {
   const pvc = estacion === "PVC";
-  const piezasPvc = f.mesa_chica === null && f.mesa_grande === null ? null : (f.mesa_chica ?? 0) + (f.mesa_grande ?? 0);
+  const piezasPvc = f.pedidos.length === 0 ? null : f.pedidos.reduce((s, p) => s + (p.cantidad_piezas ?? 0), 0);
   return {
     hora_inicio: f.hora_inicio,
     hora_fin: f.hora_fin,
-    pedido_codigo: f.pedido_codigo,
+    pedido_codigo: pvc ? "" : f.pedido_codigo,
     cantidad_piezas: pvc ? piezasPvc : f.cantidad_piezas,
     observaciones: f.observaciones,
     colocacion_pvc: pvc ? f.colocacion_pvc : null,
     perfilado: pvc ? f.perfilado : null,
     colores: pvc ? f.colores : null,
-    mesa_chica: pvc ? f.mesa_chica : null,
-    mesa_grande: pvc ? f.mesa_grande : null,
+    mesa_tamano: pvc ? f.mesa_tamano : null,
+    mesa_cantidad: pvc ? f.mesa_cantidad : null,
   };
 }
 
@@ -349,11 +380,12 @@ export async function guardarPlanilla(u: UsuarioAutenticado, estacionTrabajoId: 
   const ub: Ubicacion = { estacion_trabajo_id: et.id, estacion };
   exigirAcceso(u, ub);
   exigirTipo(et, estacion);
-  validarHoras(body.filas);
-  if (body.estado === "GUARDADA") validarGuardada(estacion, body.filas);
+  const filas = limpiarFilas(estacion, body.filas);
+  validarHoras(filas);
+  if (body.estado === "GUARDADA") validarGuardada(estacion, filas);
 
   const usuario = u.nombre_completo;
-  const pedidos = await pedidosPorCodigo(body.filas.map((f) => f.pedido_codigo));
+  const pedidos = await pedidosPorCodigo(estacion === "PVC" ? filas.flatMap((f) => f.pedidos.map((p) => p.pedido_codigo)) : filas.map((f) => f.pedido_codigo));
 
   let creando = false;
   const id = await prisma
@@ -407,16 +439,38 @@ export async function guardarPlanilla(u: UsuarioAutenticado, estacionTrabajoId: 
       await tx.planillaOperario.createMany({ data: operarios.map((o, orden) => ({ planilla_id: planillaId, usuario_id: o.usuario_id, nombre: o.nombre, bloqueado: o.bloqueado, orden })) });
 
       const idsExistentes = new Set(existente.filas.map((f) => f.id));
-      const idsEnviados = body.filas.map((f) => f.id).filter((x): x is string => !!x);
+      const idsEnviados = filas.map((f) => f.id).filter((x): x is string => !!x);
       if (idsEnviados.some((x) => !idsExistentes.has(x))) throw new AppError("Una fila no pertenece a esta planilla.", 400);
 
       // Los ítems que ya no vienen se quitan con borrado lógico: conservan sus datos y sus fotos.
       await tx.planillaFila.updateMany({ where: { planilla_id: planillaId, eliminado_en: null, id: { notIn: idsEnviados } }, data: { eliminado_en: new Date() } });
 
-      for (const [orden, f] of body.filas.entries()) {
-        const datos = { ...normalizarFila(estacion, f), orden, pedido_id: pedidos.get(f.pedido_codigo) ?? null };
-        if (f.id) await tx.planillaFila.update({ where: { id: f.id }, data: datos });
-        else await tx.planillaFila.create({ data: { ...datos, planilla_id: planillaId } });
+      // Ids de pedidos-de-tanda que ya pertenecen a cada fila: solo esos se conservan; cualquier otro id se ignora.
+      const pedidosPrevios = new Map(existente.filas.map((x) => [x.id, new Set(x.pedidos.map((p) => p.id))]));
+      for (const [orden, f] of filas.entries()) {
+        const datos = { ...normalizarFila(estacion, f), orden, pedido_id: estacion === "PVC" ? null : (pedidos.get(f.pedido_codigo) ?? null) };
+        const filaId = f.id
+          ? (await tx.planillaFila.update({ where: { id: f.id }, data: datos, select: { id: true } })).id
+          : (await tx.planillaFila.create({ data: { ...datos, planilla_id: planillaId }, select: { id: true } })).id;
+        if (estacion !== "PVC") continue;
+        // Los pedidos de la tanda se reemplazan completos, dentro de la misma transacción.
+        await tx.planillaFilaPedido.deleteMany({ where: { fila_id: filaId } });
+        const propios = pedidosPrevios.get(filaId) ?? new Set<string>();
+        const usados = new Set<string>();
+        await tx.planillaFilaPedido.createMany({
+          data: f.pedidos.map((p, j) => {
+            const conservar = !!p.id && propios.has(p.id) && !usados.has(p.id);
+            if (conservar) usados.add(p.id as string);
+            return {
+              ...(conservar ? { id: p.id } : {}),
+              fila_id: filaId,
+              orden: j,
+              pedido_codigo: p.pedido_codigo,
+              pedido_id: pedidos.get(p.pedido_codigo) ?? null,
+              cantidad_piezas: p.cantidad_piezas ?? 0,
+            };
+          }),
+        });
       }
 
       await tx.planillaProduccion.update({
@@ -474,6 +528,7 @@ export interface FiltrosRegistros {
 
 export async function listarRegistros(u: UsuarioAutenticado, f: FiltrosRegistros) {
   const { desde, hasta } = rango(f.desde, f.hasta);
+  const buscado = f.pedido?.trim().toUpperCase();
   const filas = await prisma.planillaFila.findMany({
     where: {
       eliminado_en: null,
@@ -485,7 +540,8 @@ export async function listarRegistros(u: UsuarioAutenticado, f: FiltrosRegistros
         ...(f.estacion_trabajo_id ? { estacion_trabajo_id: f.estacion_trabajo_id } : {}),
         ...(f.estado ? { estado: f.estado } : {}),
       },
-      ...(f.pedido ? { pedido_codigo: { contains: f.pedido.trim().toUpperCase() } } : {}),
+      // En PVC el pedido está en los pedidos de la tanda.
+      ...(buscado ? { OR: [{ pedido_codigo: { contains: buscado } }, { pedidos: { some: { pedido_codigo: { contains: buscado } } } }] } : {}),
     },
     select: {
       id: true,
@@ -499,25 +555,35 @@ export async function listarRegistros(u: UsuarioAutenticado, f: FiltrosRegistros
       colocacion_pvc: true,
       perfilado: true,
       colores: true,
-      mesa_chica: true,
-      mesa_grande: true,
+      mesa_tamano: true,
+      mesa_cantidad: true,
+      pedidos: { select: pedidoTandaSelect, orderBy: { orden: "asc" } },
       _count: { select: { fotos: { where: { eliminado_en: null } } } },
       planilla: { select: { id: true, estacion: true, estacion_trabajo: { select: { id: true, nombre: true } }, fecha: true, estado: true, operarios: true, _count: { select: { versiones: true } } } },
     },
     orderBy: [{ planilla: { fecha: "desc" } }, { planilla: { estacion_trabajo: { nombre: "asc" } } }, { planilla: { estacion: "asc" } }, { orden: "asc" }],
     take: 3000,
   });
-  return filas.map(({ _count, planilla, ...fila }) => ({
-    ...fila,
-    fotos: _count.fotos,
-    planilla_id: planilla.id,
-    estacion: planilla.estacion,
-    estacion_trabajo: planilla.estacion_trabajo,
-    fecha: fechaISO(planilla.fecha),
-    estado: planilla.estado,
-    operarios: planilla.operarios,
-    versiones: planilla._count.versiones,
-  }));
+  return filas.flatMap(({ _count, planilla, pedidos, ...fila }) => {
+    const comun = {
+      fotos: _count.fotos,
+      planilla_id: planilla.id,
+      estacion: planilla.estacion,
+      estacion_trabajo: planilla.estacion_trabajo,
+      fecha: fechaISO(planilla.fecha),
+      estado: planilla.estado,
+      operarios: planilla.operarios,
+      versiones: planilla._count.versiones,
+    };
+    if (planilla.estacion !== "PVC") {
+      return [{ ...fila, ...comun, fila_id: fila.id, piezas_tanda: null as number | null }];
+    }
+    // PVC: una fila por (tanda, pedido). Una tanda de borrador sin pedidos sale igual, con una sola fila sin pedido.
+    const elegidos = buscado ? pedidos.filter((p) => p.pedido_codigo.includes(buscado)) : pedidos;
+    const base = { ...fila, ...comun, fila_id: fila.id, piezas_tanda: fila.cantidad_piezas };
+    if (pedidos.length === 0) return [{ ...base, cantidad_piezas: null as number | null }];
+    return elegidos.map((p) => ({ ...base, id: p.id, pedido_codigo: p.pedido_codigo, pedido_id: p.pedido_id, cantidad_piezas: p.cantidad_piezas as number | null }));
+  });
 }
 
 const minutos = (ini: string | null, fin: string | null) => (ini && fin && aMinutos(fin) >= aMinutos(ini) ? aMinutos(fin) - aMinutos(ini) : 0);
@@ -529,41 +595,74 @@ interface FilaTraza {
   fecha: string;
   hora_inicio: string | null;
   hora_fin: string | null;
+  /** Lijado/Encolado: las del registro. PVC: las piezas de ESE pedido en la tanda. */
   cantidad_piezas: number | null;
+  /** Solo PVC: la tanda (el tiempo y las fotos son los de la tanda completa, no se prorratean). */
+  mesa_tamano: "CHICA" | "GRANDE" | null;
+  mesa_cantidad: number | null;
   fotos: number;
   estado: "BORRADOR" | "GUARDADA";
   observaciones: string | null;
   planilla_id: string;
 }
 
-async function filasPorCodigos(codigos: string[], visible: Prisma.PlanillaProduccionWhereInput = {}): Promise<FilaTraza[]> {
-  if (codigos.length === 0) return [];
-  const filas = await prisma.planillaFila.findMany({
-    where: { eliminado_en: null, pedido_codigo: { in: codigos }, planilla: { AND: [visible], area: AREA_TERMOLAMINADO } },
-    select: {
-      pedido_codigo: true,
-      hora_inicio: true,
-      hora_fin: true,
-      cantidad_piezas: true,
-      observaciones: true,
-      _count: { select: { fotos: { where: { eliminado_en: null } } } },
-      planilla: { select: { id: true, estacion: true, estacion_trabajo: { select: { id: true, nombre: true } }, fecha: true, estado: true } },
-    },
-    orderBy: [{ planilla: { fecha: "asc" } }, { hora_inicio: "asc" }],
-  });
-  return filas.map((f) => ({
-    pedido_codigo: f.pedido_codigo,
+const filaTrazaSelect = {
+  hora_inicio: true,
+  hora_fin: true,
+  observaciones: true,
+  mesa_tamano: true,
+  mesa_cantidad: true,
+  _count: { select: { fotos: { where: { eliminado_en: null } } } },
+  planilla: { select: { id: true, estacion: true, estacion_trabajo: { select: { id: true, nombre: true } }, fecha: true, estado: true } },
+} satisfies Prisma.PlanillaFilaSelect;
+
+type FilaTrazaDB = Prisma.PlanillaFilaGetPayload<{ select: typeof filaTrazaSelect }>;
+
+function aTraza(f: FilaTrazaDB, pedido_codigo: string, cantidad_piezas: number | null): FilaTraza {
+  return {
+    pedido_codigo,
     estacion: f.planilla.estacion,
     estacion_trabajo: f.planilla.estacion_trabajo,
     fecha: fechaISO(f.planilla.fecha),
     hora_inicio: f.hora_inicio,
     hora_fin: f.hora_fin,
-    cantidad_piezas: f.cantidad_piezas,
+    cantidad_piezas,
+    mesa_tamano: f.mesa_tamano,
+    mesa_cantidad: f.mesa_cantidad,
     fotos: f._count.fotos,
     estado: f.planilla.estado,
     observaciones: f.observaciones,
     planilla_id: f.planilla.id,
-  }));
+  };
+}
+
+/** Registros de los pedidos: Lijado/Encolado por fila; PVC por (tanda, pedido), con el tiempo y las fotos de la tanda completa. */
+async function filasPorCodigos(codigos: string[], visible: Prisma.PlanillaProduccionWhereInput = {}): Promise<FilaTraza[]> {
+  if (codigos.length === 0) return [];
+  const planilla = { AND: [visible], area: AREA_TERMOLAMINADO };
+  const [filas, enTandas] = await Promise.all([
+    prisma.planillaFila.findMany({
+      where: { eliminado_en: null, pedido_codigo: { in: codigos }, planilla },
+      select: { ...filaTrazaSelect, pedido_codigo: true, cantidad_piezas: true },
+    }),
+    prisma.planillaFilaPedido.findMany({
+      where: { pedido_codigo: { in: codigos }, fila: { eliminado_en: null, planilla } },
+      select: { pedido_codigo: true, cantidad_piezas: true, orden: true, fila: { select: { id: true, ...filaTrazaSelect } } },
+      orderBy: { orden: "asc" },
+    }),
+  ]);
+  const out = filas.map((f) => aTraza(f, f.pedido_codigo, f.cantidad_piezas));
+  // Un pedido repetido dentro de una misma tanda (solo posible en borrador) cuenta una vez, con las piezas sumadas.
+  const porTanda = new Map<string, FilaTraza>();
+  for (const p of enTandas) {
+    const k = `${p.fila.id}|${p.pedido_codigo}`;
+    const previo = porTanda.get(k);
+    if (previo) previo.cantidad_piezas = (previo.cantidad_piezas ?? 0) + p.cantidad_piezas;
+    else porTanda.set(k, aTraza(p.fila, p.pedido_codigo, p.cantidad_piezas));
+  }
+  out.push(...porTanda.values());
+  // Por fecha y hora de inicio (las filas sin hora, al final).
+  return out.sort((a, b) => a.fecha.localeCompare(b.fecha) || (a.hora_inicio ?? "99:99").localeCompare(b.hora_inicio ?? "99:99"));
 }
 
 function resumenPedido(codigo: string, filas: FilaTraza[], estaciones: readonly Estacion[] = ESTACIONES) {
@@ -575,6 +674,7 @@ function resumenPedido(codigo: string, filas: FilaTraza[], estaciones: readonly 
         {
           registros: fs.length,
           piezas: fs.reduce((s, f) => s + (f.cantidad_piezas ?? 0), 0),
+          // En PVC cada registro trae el minuto completo de su tanda (decisión de negocio: no se prorratea).
           minutos: fs.reduce((s, f) => s + minutos(f.hora_inicio, f.hora_fin), 0),
           primera: fs[0]?.fecha ?? null,
           ultima: fs.at(-1)?.fecha ?? null,
@@ -615,36 +715,59 @@ export async function indicadores(desdeRaw?: string, hastaRaw?: string) {
       hora_inicio: true,
       hora_fin: true,
       cantidad_piezas: true,
+      mesa_tamano: true,
+      mesa_cantidad: true,
+      pedidos: { select: { pedido_codigo: true, cantidad_piezas: true } },
       planilla: { select: { estacion: true, fecha: true } },
     },
   });
 
+  // Piezas de una fila: en PVC, la suma de las de sus pedidos.
+  const piezasDe = (f: (typeof enRango)[number]) => (f.planilla.estacion === "PVC" ? f.pedidos.reduce((s, p) => s + p.cantidad_piezas, 0) : (f.cantidad_piezas ?? 0));
+  const codigosDe = (f: (typeof enRango)[number]) => (f.planilla.estacion === "PVC" ? f.pedidos.map((p) => p.pedido_codigo) : [f.pedido_codigo]).filter(Boolean);
+  const mesasDe = (fs: typeof enRango, tamano: "CHICA" | "GRANDE") => fs.filter((f) => f.mesa_tamano === tamano).reduce((s, f) => s + (f.mesa_cantidad ?? 0), 0);
+
   const porEstacion = ESTACIONES.map((e) => {
     const fs = enRango.filter((f) => f.planilla.estacion === e);
+    // El tiempo se suma una vez por fila (en PVC, una vez por tanda aunque tenga varios pedidos).
     const min = fs.reduce((s, f) => s + minutos(f.hora_inicio, f.hora_fin), 0);
-    const piezas = fs.reduce((s, f) => s + (f.cantidad_piezas ?? 0), 0);
+    const piezas = fs.reduce((s, f) => s + piezasDe(f), 0);
+    const pvc = e === "PVC";
+    const chicas = pvc ? mesasDe(fs, "CHICA") : null;
+    const grandes = pvc ? mesasDe(fs, "GRANDE") : null;
     return {
       estacion: e,
       dias: new Set(fs.map((f) => fechaISO(f.planilla.fecha))).size,
       registros: fs.length,
-      pedidos: new Set(fs.map((f) => f.pedido_codigo).filter(Boolean)).size,
+      pedidos: new Set(fs.flatMap(codigosDe)).size,
       piezas,
       minutos: min,
       piezasPorHora: min > 0 ? Math.round((piezas / (min / 60)) * 10) / 10 : null,
+      mesas_chicas: chicas,
+      mesas_grandes: grandes,
+      mesas_por_hora: pvc ? (min > 0 ? Math.round((((chicas ?? 0) + (grandes ?? 0)) / (min / 60)) * 10) / 10 : null) : null,
     };
   });
 
   const dias = new Map<string, Record<Estacion, number>>();
+  const mesas = new Map<string, { chicas: number; grandes: number }>();
   for (const f of enRango) {
     const d = fechaISO(f.planilla.fecha);
     const reg = dias.get(d) ?? { LIJADO: 0, ENCOLADO: 0, PVC: 0 };
-    reg[f.planilla.estacion] += f.cantidad_piezas ?? 0;
+    reg[f.planilla.estacion] += piezasDe(f);
     dias.set(d, reg);
+    if (f.planilla.estacion === "PVC" && f.mesa_tamano && f.mesa_cantidad) {
+      const m = mesas.get(d) ?? { chicas: 0, grandes: 0 };
+      if (f.mesa_tamano === "CHICA") m.chicas += f.mesa_cantidad;
+      else m.grandes += f.mesa_cantidad;
+      mesas.set(d, m);
+    }
   }
   const porDia = [...dias.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([fecha, piezas]) => ({ fecha, piezas }));
+  const mesasPorDia = [...mesas.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([fecha, m]) => ({ fecha, ...m }));
 
   // Trazabilidad de los pedidos que aparecen en el rango, con todo su historial.
-  const codigos = [...new Set(enRango.map((f) => f.pedido_codigo).filter(Boolean))];
+  const codigos = [...new Set(enRango.flatMap(codigosDe))];
   const todas = await filasPorCodigos(codigos);
   const porPedido = new Map<string, FilaTraza[]>();
   for (const f of todas) porPedido.set(f.pedido_codigo, [...(porPedido.get(f.pedido_codigo) ?? []), f]);
@@ -655,6 +778,7 @@ export async function indicadores(desdeRaw?: string, hastaRaw?: string) {
     hasta: fechaISO(hasta),
     porEstacion,
     porDia,
+    mesasPorDia,
     pedidos: {
       total: pedidos.length,
       completos: pedidos.filter((p) => p.completo).length,
@@ -668,7 +792,7 @@ export async function indicadores(desdeRaw?: string, hastaRaw?: string) {
 export async function sugerirPedidos(u: UsuarioAutenticado, q: string) {
   const t = q.trim().toUpperCase();
   if (t.length < 2) return [];
-  const [sync, usados] = await Promise.all([
+  const [sync, usados, usadosTanda] = await Promise.all([
     prisma.pedido.findMany({
       where: { codigo_pedido: { contains: t, mode: "insensitive" }, estado: { not: "ELIMINADO" }, orden: { estado: { not: "ELIMINADO" } } },
       select: { codigo_pedido: true, referencia: true },
@@ -676,14 +800,16 @@ export async function sugerirPedidos(u: UsuarioAutenticado, q: string) {
       take: 8,
     }),
     prisma.planillaFila.findMany({ where: { eliminado_en: null, pedido_codigo: { contains: t }, planilla: whereVisible(u) }, select: { pedido_codigo: true }, distinct: ["pedido_codigo"], take: 8 }),
+    // PVC: los pedidos de las tandas.
+    prisma.planillaFilaPedido.findMany({ where: { pedido_codigo: { contains: t }, fila: { eliminado_en: null, planilla: whereVisible(u) } }, select: { pedido_codigo: true }, distinct: ["pedido_codigo"], take: 8 }),
   ]);
   const out = new Map<string, { codigo: string; referencia: string | null }>();
   for (const p of sync) out.set(p.codigo_pedido.toUpperCase(), { codigo: p.codigo_pedido.toUpperCase(), referencia: p.referencia });
-  for (const u of usados) if (!out.has(u.pedido_codigo)) out.set(u.pedido_codigo, { codigo: u.pedido_codigo, referencia: null });
+  for (const x of [...usados, ...usadosTanda]) if (!out.has(x.pedido_codigo)) out.set(x.pedido_codigo, { codigo: x.pedido_codigo, referencia: null });
   return [...out.values()].slice(0, 10);
 }
 
-// Códigos de color ya usados, del más al menos frecuente (autocompletado).
+// Códigos de color ya usados, del más al menos frecuente (autocompletado). En PVC el color es de la tanda.
 export async function coloresUsados(u: UsuarioAutenticado) {
   const g = await prisma.planillaFila.groupBy({
     by: ["colores"],
