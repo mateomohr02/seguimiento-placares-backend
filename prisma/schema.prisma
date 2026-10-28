@@ -59,30 +59,30 @@ enum PiezaFisicaEstado {
 }
 
 model Orden {
-  id                    String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  id                     String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   codigoOrdenFabricacion Int
-  numeroOrdenCustom     String
-  descripcion           String
-  estado                OrdenEstado @default(PENDIENTE)
-  creado_en             DateTime    @default(now())
-  eliminado_en          DateTime?
-  archivada_en          DateTime? // archivar solo oculta la orden del listado inicial; no cambia su estado ni libera el codigoOrdenFabricacion
+  numeroOrdenCustom      String
+  descripcion            String
+  estado                 OrdenEstado @default(PENDIENTE)
+  creado_en              DateTime    @default(now())
+  eliminado_en           DateTime?
+  archivada_en           DateTime? // archivar solo oculta la orden del listado inicial; no cambia su estado ni libera el codigoOrdenFabricacion
 
-  pedidos     Pedido[]
-  hojasCorte  HojaCorte[]
+  pedidos    Pedido[]
+  hojasCorte HojaCorte[]
 
   @@map("orden")
 }
 
 model Pedido {
-  id             String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  orden_id       String       @db.Uuid
-  codigo_pedido  String
-  referencia     String
+  id              String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orden_id        String       @db.Uuid
+  codigo_pedido   String
+  referencia      String
   nombreComercial String
-  estado         PedidoEstado @default(PENDIENTE)
-  creado_en      DateTime     @default(now())
-  eliminado_en   DateTime?
+  estado          PedidoEstado @default(PENDIENTE)
+  creado_en       DateTime     @default(now())
+  eliminado_en    DateTime?
 
   orden      Orden             @relation(fields: [orden_id], references: [id])
   modulos    Modulo[]
@@ -94,19 +94,19 @@ model Pedido {
 }
 
 model Modulo {
-  id           String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  pedido_id    String       @db.Uuid
+  id           String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  pedido_id    String        @db.Uuid
   idEscena     Int
   descripcion  String
   linea        LineaProducto // PLACARES o COCINAS (idCatalogo de la fila raíz del módulo; ver sync/linea-producto.ts)
-  estado       ModuloEstado @default(PENDIENTE)
-  creado_en    DateTime     @default(now())
+  estado       ModuloEstado  @default(PENDIENTE)
+  creado_en    DateTime      @default(now())
   eliminado_en DateTime?
 
-  pedido         Pedido         @relation(fields: [pedido_id], references: [id])
-  despieceTipos  DespieceTipo[]
-  planos         PlanoPedido[]
-  partida        ModuloPartida?
+  pedido        Pedido         @relation(fields: [pedido_id], references: [id])
+  despieceTipos DespieceTipo[]
+  planos        PlanoPedido[]
+  partida       ModuloPartida?
 
   @@map("modulo")
 }
@@ -283,8 +283,8 @@ model PlanoPedido {
   creado_en      DateTime  @default(now())
   eliminado_en   DateTime?
 
-  pedido      Pedido                @relation(fields: [pedido_id], references: [id])
-  modulo      Modulo?               @relation(fields: [modulo_id], references: [id])
+  pedido      Pedido                 @relation(fields: [pedido_id], references: [id])
+  modulo      Modulo?                @relation(fields: [modulo_id], references: [id])
   anotaciones PlanoPedidoAnotacion[]
 
   @@index([pedido_id])
@@ -349,23 +349,24 @@ model RolPermiso {
 // Único por (nombre, apellido) sin distinguir mayúsculas: índice de expresión `usuario_nombre_apellido_ci_key`
 // (lower(nombre), lower(apellido)), creado a mano en 20261028120000_estaciones_trabajo (Prisma no lo expresa).
 model Usuario {
-  id             String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  nombre         String
-  apellido       String    @default("")
-  pin            String    @unique
-  rol_id         String    @db.Uuid
-  activo         Boolean   @default(true)
-  creado_en      DateTime  @default(now())
-  ultimo_acceso  DateTime?
+  id            String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  nombre        String
+  apellido      String    @default("")
+  pin           String    @unique
+  rol_id        String    @db.Uuid
+  activo        Boolean   @default(true)
+  creado_en     DateTime  @default(now())
+  ultimo_acceso DateTime?
 
-  rol Rol @relation(fields: [rol_id], references: [id])
-  estaciones UsuarioEstacionTrabajo[]
+  rol                        Rol                        @relation(fields: [rol_id], references: [id])
+  estaciones                 UsuarioEstacionTrabajo[]
   // Configuración vieja (un usuario = una estación): se conserva sin uso desde 20261028120000_estaciones_trabajo,
   // incluida `operarios` (usuario_operario): desde la fase 2 el código ya no la usa.
-  planillas UsuarioPlanilla[]
-  operarios UsuarioOperario[]
-  planillasOperario PlanillaOperario[]
-  estadoProduccion UsuarioEstadoProduccion?
+  planillas                  UsuarioPlanilla[]
+  operarios                  UsuarioOperario[]
+  planillasOperario          PlanillaOperario[]
+  observacionesPlanificacion PlanificacionObservacion[]
+  estadoProduccion           UsuarioEstadoProduccion?
 
   @@index([rol_id])
   @@map("usuario")
@@ -374,8 +375,8 @@ model Usuario {
 // Qué planillas de Termolaminado puede completar cada usuario (las asigna técnica). Un
 // usuario puede tener ninguna, algunas o todas. Aditiva (diseño.md §14).
 model UsuarioPlanilla {
-  usuario_id String           @db.Uuid
-  estacion   PlanillaEstacion
+  usuario_id                String           @db.Uuid
+  estacion                  PlanillaEstacion
   /// Operarios que se preseleccionan al abrir una planilla nueva de esta estación (lista de nombres). null = todos los del usuario.
   operarios_predeterminados Json?
 
@@ -447,23 +448,23 @@ enum PlanificacionTipo {
 // versión previa en `planilla_version`. `operarios` es la copia de los nombres
 // configurados por técnica al crearla.
 model PlanillaProduccion {
-  id            String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  area          String           @default("TERMOLAMINADO")
-  estacion      PlanillaEstacion
-  fecha         DateTime         @db.Date
-  estado        PlanillaEstado   @default(BORRADOR)
-  operarios     String[]
-  creado_por    String
-  modificado_por String
-  creado_en     DateTime         @default(now())
-  actualizado_en DateTime        @default(now())
-  guardada_en   DateTime?
+  id                  String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  area                String           @default("TERMOLAMINADO")
+  estacion            PlanillaEstacion
+  fecha               DateTime         @db.Date
+  estado              PlanillaEstado   @default(BORRADOR)
+  operarios           String[]
+  creado_por          String
+  modificado_por      String
+  creado_en           DateTime         @default(now())
+  actualizado_en      DateTime         @default(now())
+  guardada_en         DateTime?
   /// Estación de trabajo que completa la planilla (diseño.md §17): una planilla por estación + tipo + día.
-  estacion_trabajo_id String @db.Uuid
+  estacion_trabajo_id String           @db.Uuid
 
-  estacion_trabajo EstacionTrabajo   @relation(fields: [estacion_trabajo_id], references: [id], onDelete: Restrict)
-  filas            PlanillaFila[]
-  versiones        PlanillaVersion[]
+  estacion_trabajo   EstacionTrabajo    @relation(fields: [estacion_trabajo_id], references: [id], onDelete: Restrict)
+  filas              PlanillaFila[]
+  versiones          PlanillaVersion[]
   operarios_planilla PlanillaOperario[]
 
   @@unique([estacion_trabajo_id, estacion, fecha])
@@ -505,13 +506,13 @@ enum MesaTamano {
 // En PVC `cantidad_piezas` = suma de las piezas de sus pedidos (lo calcula el backend).
 // `mesa_chica` / `mesa_grande` quedaron sin uso (se conservan en la tabla; la API ya no los expone).
 model PlanillaFila {
-  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  planilla_id     String   @db.Uuid
+  id              String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  planilla_id     String      @db.Uuid
   orden           Int
   hora_inicio     String?
   hora_fin        String?
-  pedido_codigo   String   @default("")
-  pedido_id       String?  @db.Uuid
+  pedido_codigo   String      @default("")
+  pedido_id       String?     @db.Uuid
   cantidad_piezas Int?
   observaciones   String?
   colocacion_pvc  String?
@@ -524,7 +525,7 @@ model PlanillaFila {
   /// Borrado lógico: un ítem quitado de la planilla se conserva (con sus fotos) para el historial.
   eliminado_en    DateTime?
 
-  planilla PlanillaProduccion @relation(fields: [planilla_id], references: [id], onDelete: Cascade)
+  planilla PlanillaProduccion   @relation(fields: [planilla_id], references: [id], onDelete: Cascade)
   fotos    PlanillaFoto[]
   pedidos  PlanillaFilaPedido[]
 
@@ -568,14 +569,14 @@ model PlanillaFoto {
 
 // Versión previa de una planilla GUARDADA, tomada justo antes de aplicar una corrección.
 model PlanillaVersion {
-  id            String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  planilla_id   String   @db.Uuid
-  version       Int
-  datos         Json
-  guardada_por  String
-  guardada_en   DateTime
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  planilla_id     String   @db.Uuid
+  version         Int
+  datos           Json
+  guardada_por    String
+  guardada_en     DateTime
   reemplazada_por String
-  reemplazada_en DateTime @default(now())
+  reemplazada_en  DateTime @default(now())
 
   planilla PlanillaProduccion @relation(fields: [planilla_id], references: [id], onDelete: Cascade)
 
@@ -625,9 +626,9 @@ model EstacionTrabajo {
   creado_en DateTime @default(now())
   estado_id String?  @db.Uuid
 
-  estado    EstadoProduccion?         @relation(fields: [estado_id], references: [id], onDelete: Restrict)
-  planillas EstacionTrabajoPlanilla[]
-  usuarios  UsuarioEstacionTrabajo[]
+  estado              EstadoProduccion?         @relation(fields: [estado_id], references: [id], onDelete: Restrict)
+  planillas           EstacionTrabajoPlanilla[]
+  usuarios            UsuarioEstacionTrabajo[]
   planillasProduccion PlanillaProduccion[]
 
   @@index([estado_id])
@@ -694,7 +695,8 @@ model PlanificacionItem {
   creado_en     DateTime          @default(now())
   eliminado_en  DateTime?
 
-  marcas PlanificacionMarca[]
+  marcas      PlanificacionMarca[]
+  comentarios PlanificacionObservacion[]
 
   @@index([area, semana_inicio, tipo])
   @@map("planificacion_item")
@@ -712,4 +714,39 @@ model PlanificacionMarca {
 
   @@id([item_id, estado_id])
   @@map("planificacion_marca")
+}
+
+// Observación de un usuario en una fila de la planificación (la de técnica sigue en planificacion_item.observaciones).
+// Borrado lógico; cada alta, edición y baja queda en el historial.
+model PlanificacionObservacion {
+  id            String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  item_id       String    @db.Uuid
+  usuario_id    String?   @db.Uuid
+  autor         String
+  texto         String
+  creado_en     DateTime  @default(now())
+  editado_en    DateTime?
+  eliminado_en  DateTime?
+  eliminado_por String?
+
+  item      PlanificacionItem                   @relation(fields: [item_id], references: [id], onDelete: Cascade)
+  usuario   Usuario?                            @relation(fields: [usuario_id], references: [id], onDelete: SetNull)
+  historial PlanificacionObservacionHistorial[]
+
+  @@index([item_id])
+  @@map("planificacion_observacion")
+}
+
+model PlanificacionObservacionHistorial {
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  observacion_id String   @db.Uuid
+  accion         String // CREADA | EDITADA | ELIMINADA
+  texto          String
+  por            String
+  en             DateTime @default(now())
+
+  observacion PlanificacionObservacion @relation(fields: [observacion_id], references: [id], onDelete: Cascade)
+
+  @@index([observacion_id])
+  @@map("planificacion_observacion_historial")
 }
