@@ -14,7 +14,8 @@ export async function listOrdenes({ archivadas, linea }: { archivadas: boolean; 
         ? { pedidos: { some: { estado: { not: "ELIMINADO" }, modulos: { some: { estado: { not: "ELIMINADO" }, linea } } } } }
         : {}),
     },
-    orderBy: { creado_en: "desc" },
+    // Cartera ordenada a mano (posicion; las nuevas van al final), luego por fecha de creación.
+    orderBy: [{ posicion: "asc" }, { creado_en: "asc" }],
     include: {
       // codigo_pedido: el buscador del listado también encuentra órdenes por pedido.
       pedidos: {

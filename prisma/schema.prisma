@@ -67,10 +67,12 @@ model Orden {
   creado_en              DateTime    @default(now())
   eliminado_en           DateTime?
   archivada_en           DateTime? // archivar solo oculta la orden del listado inicial; no cambia su estado ni libera el codigoOrdenFabricacion
+  posicion               Int         @default(0) // lugar en la cartera (listado inicial, global): lo reordena técnica a mano; las nuevas van al final
 
   pedidos    Pedido[]
   hojasCorte HojaCorte[]
 
+  @@index([posicion])
   @@map("orden")
 }
 
@@ -89,6 +91,8 @@ model Pedido {
   documentos DocumentoPedido[]
   planos     PlanoPedido[]
   escenas    EscenaPedido[]
+
+  planificacionItems PlanificacionItem[]
 
   @@map("pedido")
 }
@@ -442,6 +446,12 @@ enum PlanificacionTipo {
   RECLAMOS
 }
 
+// Plantilla de planificación de una estación de trabajo (hoy solo TERMOLAMINADO: tabla de pedidos + tabla de reclamos).
+// Una estación sin plantilla no tiene planificación.
+enum PlantillaPlanificacion {
+  TERMOLAMINADO
+}
+
 // Una planilla por estación y día (`fecha` es el día de la carga). Se completa durante
 // el día como BORRADOR (se guarda sola en el servidor, no se pierde si se cierra la
 // sesión) y se cierra como GUARDADA. Corregir una planilla GUARDADA guarda antes la
@@ -620,16 +630,19 @@ model EstadoProduccion {
 // operarios. No se borra: activa = false. Nombre único sin distinguir mayúsculas: índice de expresión
 // `estacion_trabajo_nombre_ci_key` (lower(nombre)), creado a mano en la migración.
 model EstacionTrabajo {
-  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  nombre    String
-  activa    Boolean  @default(true)
-  creado_en DateTime @default(now())
-  estado_id String?  @db.Uuid
+  id                      String                  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  nombre                  String
+  activa                  Boolean                 @default(true)
+  creado_en               DateTime                @default(now())
+  estado_id               String?                 @db.Uuid
+  // Plantilla de planificación (null = la estación no tiene planificación; hoy solo TERMOLAMINADO).
+  plantilla_planificacion PlantillaPlanificacion?
 
   estado              EstadoProduccion?         @relation(fields: [estado_id], references: [id], onDelete: Restrict)
   planillas           EstacionTrabajoPlanilla[]
   usuarios            UsuarioEstacionTrabajo[]
   planillasProduccion PlanillaProduccion[]
+  planificacionItems  PlanificacionItem[]
 
   @@index([estado_id])
   @@map("estacion_trabajo")
@@ -669,23 +682,20 @@ model UsuarioEstadoProduccion {
   @@map("usuario_estado_produccion")
 }
 
-// Planificación semanal que carga técnica a mano: una fila por pedido (o por reclamo). Los pedidos usan
-// cliente / n_tw / n_orden / modelo / color / fabrica / fecha_limite; los reclamos, cliente / distribuidor /
-// ticket / n_tw / tipo_reclamo / color / compromiso / finalizado_en / observaciones. `semana_inicio` es el
-// lunes. Borrado lógico.
+// Planificación semanal de una estación de trabajo (su plantilla define las tablas; hoy TERMOLAMINADO: PEDIDOS y RECLAMOS).
+// Cada fila se arma sobre un pedido ya cargado en la app (`pedido_id`): de ahí salen el N° de pedido (N° TW), el cliente
+// (pedido.referencia) y el N° de orden (de su orden). Modelo, color, compromiso, etc. son datos de la fila. `semana_inicio`
+// es el lunes; `orden` es el lugar dentro de (estación, semana, tipo). Borrado lógico. `pedido_id` solo queda nulo en filas
+// ya borradas que la migración no pudo vincular a un pedido.
 model PlanificacionItem {
   id            String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  area          String            @default("TERMOLAMINADO")
+  estacion_id   String            @db.Uuid
+  pedido_id     String?           @db.Uuid
   tipo          PlanificacionTipo
   semana_inicio DateTime          @db.Date
   orden         Int               @default(0)
-  cliente       String            @default("")
-  n_tw          String            @default("")
-  n_orden       String?
   modelo        String?
   color         String?
-  fabrica       DateTime?         @db.Date
-  fecha_limite  DateTime?         @db.Date
   distribuidor  String?
   ticket        String?
   tipo_reclamo  String?
@@ -695,10 +705,13 @@ model PlanificacionItem {
   creado_en     DateTime          @default(now())
   eliminado_en  DateTime?
 
+  estacion    EstacionTrabajo            @relation(fields: [estacion_id], references: [id], onDelete: Restrict)
+  pedido      Pedido?                    @relation(fields: [pedido_id], references: [id], onDelete: Restrict)
   marcas      PlanificacionMarca[]
   comentarios PlanificacionObservacion[]
 
-  @@index([area, semana_inicio, tipo])
+  @@index([estacion_id, semana_inicio, tipo, orden])
+  @@index([pedido_id])
   @@map("planificacion_item")
 }
 
