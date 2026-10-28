@@ -27,6 +27,11 @@ const DIRS: Record<string, { planas: string[]; arboles: string[] }> = Object.fro
   CATALOGOS.map((c) => [c, { planas: [`${c}/Colores`, `Showroom/${c}/colores`], arboles: [`${c}/Texturas`] }]),
 );
 
+// Cocinas (3): además de `Colores` (melaminas, termolaminados, vidrios), las escenas usan códigos que viven en carpetas planas chicas
+// del árbol de texturas: L001/L043… (perfiles y tiradores), brillonegro3/brillometal3 (metales), horno1 y las esferas cromadas. Se
+// listan como las demás para que `texturas3d:sincronizar` las copie y no haya que indexar todo el árbol para encontrarlas.
+DIRS["3"].planas.push("3/Texturas/Defecto", "3/Texturas/Varios/Colores L", "3/Texturas/Varios/Metales", "3/Texturas/Varios/Esferas", "3/Texturas/Varios/EsferasColores");
+
 const cacheCarpetas = new Map<string, Map<string, string>>();
 const indices = new Map<string, Promise<Map<string, string>>>();
 
@@ -42,7 +47,7 @@ async function listarCarpeta(rel: string): Promise<Map<string, string>> {
     const dir = path.join(RAIZ(), rel);
     for (const f of (await conTiempo(readdir(dir), 8000)) ?? []) {
       const ext = path.extname(f).toLowerCase();
-      if (EXTENSIONES.includes(ext)) mapa.set(path.basename(f, path.extname(f)).toLowerCase(), path.join(dir, f));
+      if (EXTENSIONES.includes(ext)) mapa.set(path.basename(f, path.extname(f)).trim().toLowerCase(), path.join(dir, f)); // hay archivos con espacio ("PBB .jpg")
     }
   } catch {
     // carpeta inexistente o disco no disponible: sin resultados
@@ -66,7 +71,7 @@ async function indexarArbol(rel: string): Promise<Map<string, string>> {
       const p = path.join(dir, e.name);
       if (e.isDirectory()) await recorrer(p, nivel + 1);
       else if (EXTENSIONES.includes(path.extname(e.name).toLowerCase())) {
-        const k = path.basename(e.name, path.extname(e.name)).toLowerCase();
+        const k = path.basename(e.name, path.extname(e.name)).trim().toLowerCase();
         if (!mapa.has(k)) mapa.set(k, p);
       }
     }
@@ -118,13 +123,23 @@ async function buscarEnDisco(catalogo: string, clave: string): Promise<string | 
 const mimeDe = (archivo: string) => (path.extname(archivo).toLowerCase() === ".png" ? "image/png" : "image/jpeg");
 const claveDb = (catalogo: string, clave: string) => `${catalogo}/${clave}`;
 
+/**
+ * "<636>BNO" = código BNO del catálogo 636 (material de encimera de una cocina): el prefijo manda solo si es un catálogo
+ * conocido; otros (`<7>L047`, `<5002>metall`) son marcas internas de TeoWin y se buscan en el catálogo de la pieza.
+ */
+export function resolverCatalogo(catalogo: string, material: string): { catalogo: string; material: string } {
+  const m = /^<(\d+)>(.+)$/.exec(material.trim());
+  return m && DIRS[m[1]] ? { catalogo: m[1], material: m[2] } : { catalogo, material };
+}
+
 function catalogoValido(c: string): string {
   if (!/^\d{1,6}$/.test(c)) throw new AppError("Catálogo inválido.", 400);
   return c;
 }
 
 /** Copia a la base la textura de `material` (del catálogo dado) si está en la carpeta de TeoWin. */
-export async function asegurarTextura(catalogo: string, material: string): Promise<boolean> {
+export async function asegurarTextura(catalogoPedido: string, materialPedido: string): Promise<boolean> {
+  const { catalogo, material } = resolverCatalogo(catalogoPedido, materialPedido);
   const clave = normalizarClave(material);
   if (!clave) return false;
   const id = claveDb(catalogo, clave);
@@ -156,8 +171,9 @@ export async function asegurarTexturas(materiales: string[]): Promise<void> {
 }
 
 export async function getTextura(catalogo: string, material: string) {
-  const cat = catalogoValido(catalogo);
-  const clave = normalizarClave(material);
+  const pedido = resolverCatalogo(catalogoValido(catalogo), material);
+  const cat = pedido.catalogo;
+  const clave = normalizarClave(pedido.material);
   if (!clave) throw new AppError("Textura no encontrada.", 404);
   if (!(await asegurarTextura(cat, clave).catch(() => false))) throw new AppError("Textura no encontrada.", 404);
   const t = await prisma.textura3D.findUnique({ where: { clave: claveDb(cat, clave) }, select: { contenido: true, mime: true } });

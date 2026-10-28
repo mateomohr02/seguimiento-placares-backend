@@ -6,7 +6,7 @@ import { AppError } from "../../utils/AppError";
 import { parseIdParam } from "../../utils/parseIdParam";
 import { requierePermiso } from "../auth/auth.middleware";
 import { PERMISOS } from "../auth/permisos";
-import { ESTACIONES, parsearPlanillaBody, parseEstacion, type Estacion } from "./schemas/planilla.schema";
+import { parsearPlanillaBody, parseEstacion } from "./schemas/planilla.schema";
 import {
   coloresUsados,
   getPlanilla,
@@ -21,61 +21,43 @@ import {
 import {
   agregarFoto,
   eliminarFoto,
-  estacionDeFila,
-  estacionDeFoto,
   getFoto,
   MAX_FOTO_BYTES,
   MIMES_FOTO,
+  ubicacionDeFila,
+  ubicacionDeFoto,
 } from "./services/fotos-operarios.service";
-import {
-  guardarConfiguracionUsuario,
-  guardarEstados,
-  listarConfiguracionUsuarios,
-  listarEstados,
-  MAX_OPERARIOS,
-  operariosDe,
-  predeterminadosDe,
-} from "./services/configuracion-usuarios.service";
+import { guardarEstados, listarEstados } from "./services/configuracion-usuarios.service";
+import { exigirAcceso, exigirVisible, tiposVisibles } from "./services/acceso-planillas";
 
 // Planillas de producción de Termolaminado (diseño.md §14). Montado en /api/planillas.
 // Ver (tabla, indicadores, trazabilidad): planillas.ver. Completar y corregir: planillas.completar.
 export const planillasRouter = Router();
 
-// Completar una planilla exige el permiso (en la ruta) y tener asignada esa estación.
-function exigirAcceso(asignadas: string[], estacion: string) {
-  if (!asignadas.includes(estacion)) throw new AppError("No tenés acceso a esta planilla.", 403);
-}
-
-// Estaciones cuyos registros puede ver el usuario: los de fábrica, solo las planillas que tienen asignadas;
-// el resto de los roles (técnica, gerencia, admin), todas.
-function estacionesVisibles(u: { rol: string; planillas: string[] }): Estacion[] {
-  return u.rol === "fabrica" ? ESTACIONES.filter((e) => u.planillas.includes(e)) : [...ESTACIONES];
-}
-
-function exigirVisible(u: { rol: string; planillas: string[] }, estacion: string) {
-  if (!(estacionesVisibles(u) as string[]).includes(estacion)) throw new AppError("No tenés acceso a los registros de esta planilla.", 403);
-}
+// Acceso por estación de trabajo (diseño.md §17): ver acceso-planillas.ts.
+// Completar exige ser miembro activo de la estación (que tenga ese tipo de planilla) o `planillas.configurar`.
+// Ver: fabrica solo las planillas de sus estaciones; el resto de los roles, todas.
 
 const str = (v: unknown) => (typeof v === "string" && v !== "" ? v : undefined);
 
 planillasRouter.get(
-  "/dia/:estacion/:fecha",
+  "/dia/:estacionTrabajoId/:planilla/:fecha",
   requierePermiso(PERMISOS.PLANILLAS_VER),
   catchAsync(async (req, res) => {
-    const estacion = parseEstacion(String(req.params.estacion));
-    exigirVisible(req.usuario!, estacion);
-    return sendResponse(res, 200, await getPlanillaDelDia(estacion, String(req.params.fecha)));
+    const estacionTrabajoId = parseIdParam(String(req.params.estacionTrabajoId));
+    const tipo = parseEstacion(String(req.params.planilla));
+    return sendResponse(res, 200, await getPlanillaDelDia(req.usuario!, estacionTrabajoId, tipo, String(req.params.fecha)));
   }),
 );
 
 planillasRouter.put(
-  "/dia/:estacion/:fecha",
+  "/dia/:estacionTrabajoId/:planilla/:fecha",
   requierePermiso(PERMISOS.PLANILLAS_COMPLETAR),
   catchAsync(async (req, res) => {
-    const estacion = parseEstacion(String(req.params.estacion));
-    exigirAcceso(req.usuario!.planillas, estacion);
+    const estacionTrabajoId = parseIdParam(String(req.params.estacionTrabajoId));
+    const tipo = parseEstacion(String(req.params.planilla));
     const body = parsearPlanillaBody(req.body);
-    const planilla = await guardarPlanilla(estacion, String(req.params.fecha), body, req.usuario!.nombre, req.usuario!.id);
+    const planilla = await guardarPlanilla(req.usuario!, estacionTrabajoId, tipo, String(req.params.fecha), body);
     return sendResponse(res, 200, planilla);
   }),
 );
@@ -83,7 +65,10 @@ planillasRouter.put(
 const RegistrosQuery = z.object({
   desde: z.string().optional(),
   hasta: z.string().optional(),
+  /** Tipo de planilla (LIJADO, ENCOLADO, PVC). */
   estacion: z.string().optional(),
+  /** Estación de trabajo. */
+  estacion_trabajo_id: z.string().uuid().optional(),
   estado: z.enum(["BORRADOR", "GUARDADA"]).optional(),
   pedido: z.string().max(40).optional(),
 });
@@ -93,9 +78,13 @@ planillasRouter.get(
   requierePermiso(PERMISOS.PLANILLAS_VER),
   catchAsync(async (req, res) => {
     const q = RegistrosQuery.parse(req.query);
+    const u = req.usuario!;
     const estacion = q.estacion ? parseEstacion(q.estacion) : undefined;
-    if (estacion) exigirVisible(req.usuario!, estacion);
-    return sendResponse(res, 200, await listarRegistros({ ...q, estacion, estaciones: estacionesVisibles(req.usuario!) }));
+    if (estacion && !tiposVisibles(u).includes(estacion)) throw new AppError("No tenés acceso a los registros de esta planilla.", 403);
+    if (q.estacion_trabajo_id && u.rol === "fabrica" && !u.estaciones.some((e) => e.id === q.estacion_trabajo_id)) {
+      throw new AppError("No tenés acceso a los registros de esa estación de trabajo.", 403);
+    }
+    return sendResponse(res, 200, await listarRegistros(u, { ...q, estacion }));
   }),
 );
 
@@ -109,55 +98,25 @@ planillasRouter.get(
   "/trazabilidad",
   requierePermiso(PERMISOS.PLANILLAS_VER),
   catchAsync(async (req, res) => {
-    const visibles = estacionesVisibles(req.usuario!);
-    if (visibles.length === 0) throw new AppError("No tenés acceso a los registros de ninguna planilla.", 403);
-    return sendResponse(res, 200, await trazabilidadDePedido(str(req.query.pedido) ?? "", visibles));
+    if (tiposVisibles(req.usuario!).length === 0) throw new AppError("No tenés acceso a los registros de ninguna planilla.", 403);
+    return sendResponse(res, 200, await trazabilidadDePedido(req.usuario!, str(req.query.pedido) ?? ""));
   }),
 );
 
 planillasRouter.get(
   "/pedidos-sugeridos",
   requierePermiso(PERMISOS.PLANILLAS_VER),
-  catchAsync(async (req, res) => sendResponse(res, 200, await sugerirPedidos(str(req.query.q) ?? "", estacionesVisibles(req.usuario!)))),
+  catchAsync(async (req, res) => sendResponse(res, 200, await sugerirPedidos(req.usuario!, str(req.query.q) ?? ""))),
 );
 
 planillasRouter.get(
   "/colores",
   requierePermiso(PERMISOS.PLANILLAS_VER),
-  catchAsync(async (req, res) => sendResponse(res, 200, await coloresUsados(estacionesVisibles(req.usuario!)))),
+  catchAsync(async (req, res) => sendResponse(res, 200, await coloresUsados(req.usuario!))),
 );
 
-// Los operarios entre los que elige el usuario que completa la planilla (los configura técnica por usuario).
-planillasRouter.get(
-  "/operarios",
-  requierePermiso(PERMISOS.PLANILLAS_VER),
-  catchAsync(async (req, res) =>
-    sendResponse(res, 200, { operarios: await operariosDe(req.usuario!.id), predeterminados: await predeterminadosDe(req.usuario!.id) }),
-  ),
-);
-
-// Configuración por usuario de fábrica (técnica): planillas que completa, estado de producción y operarios.
-planillasRouter.get(
-  "/accesos",
-  requierePermiso(PERMISOS.PLANILLAS_CONFIGURAR),
-  catchAsync(async (_req, res) => sendResponse(res, 200, await listarConfiguracionUsuarios())),
-);
-
-planillasRouter.put(
-  "/accesos/:usuarioId",
-  requierePermiso(PERMISOS.PLANILLAS_CONFIGURAR),
-  catchAsync(async (req, res) => {
-    const input = z
-      .object({
-        estaciones: z.array(z.string()).max(3),
-        estado_id: z.string().uuid().nullable(),
-        operarios: z.array(z.string().max(60)).max(MAX_OPERARIOS),
-      })
-      .parse(req.body);
-    await guardarConfiguracionUsuario(parseIdParam(String(req.params.usuarioId)), input);
-    return sendResponse(res, 200, await listarConfiguracionUsuarios());
-  }),
-);
+// La configuración por usuario (/planillas/accesos) se quitó: las planillas y el estado productivo los tiene la
+// estación de trabajo (/api/estaciones-trabajo, diseño.md §17).
 
 // Catálogo de estados de producción (los define técnica).
 planillasRouter.get(
@@ -181,9 +140,7 @@ planillasRouter.get(
   "/versiones/:id",
   requierePermiso(PERMISOS.PLANILLAS_VER),
   catchAsync(async (req, res) => {
-    const version = await getVersion(parseIdParam(String(req.params.id)));
-    exigirVisible(req.usuario!, version.estacion);
-    return sendResponse(res, 200, version);
+    return sendResponse(res, 200, await getVersion(req.usuario!, parseIdParam(String(req.params.id))));
   }),
 );
 
@@ -194,8 +151,8 @@ planillasRouter.post(
   catchAsync(async (req, res) => {
     if (!Buffer.isBuffer(req.body)) throw new AppError("Se esperaba una imagen (JPG, PNG o WEBP).", 415);
     const filaId = parseIdParam(String(req.params.filaId));
-    exigirAcceso(req.usuario!.planillas, await estacionDeFila(filaId));
-    return sendResponse(res, 201, await agregarFoto(filaId, req.body, req.usuario!.nombre));
+    exigirAcceso(req.usuario!, await ubicacionDeFila(filaId));
+    return sendResponse(res, 201, await agregarFoto(filaId, req.body, req.usuario!.nombre_completo));
   }),
 );
 
@@ -204,7 +161,7 @@ planillasRouter.get(
   requierePermiso(PERMISOS.PLANILLAS_VER),
   catchAsync(async (req, res) => {
     const fotoId = parseIdParam(String(req.params.fotoId));
-    exigirVisible(req.usuario!, await estacionDeFoto(fotoId));
+    exigirVisible(req.usuario!, await ubicacionDeFoto(fotoId));
     const { contenido, mime } = await getFoto(fotoId);
     res.setHeader("Content-Type", mime);
     res.setHeader("Content-Length", contenido.length);
@@ -219,7 +176,7 @@ planillasRouter.delete(
   requierePermiso(PERMISOS.PLANILLAS_COMPLETAR),
   catchAsync(async (req, res) => {
     const fotoId = parseIdParam(String(req.params.fotoId));
-    exigirAcceso(req.usuario!.planillas, await estacionDeFoto(fotoId));
+    exigirAcceso(req.usuario!, await ubicacionDeFoto(fotoId));
     await eliminarFoto(fotoId);
     return sendResponse(res, 200, null);
   }),
@@ -230,8 +187,6 @@ planillasRouter.get(
   "/:id",
   requierePermiso(PERMISOS.PLANILLAS_VER),
   catchAsync(async (req, res) => {
-    const planilla = await getPlanilla(parseIdParam(String(req.params.id)));
-    exigirVisible(req.usuario!, planilla.estacion);
-    return sendResponse(res, 200, planilla);
+    return sendResponse(res, 200, await getPlanilla(req.usuario!, parseIdParam(String(req.params.id))));
   }),
 );

@@ -12,6 +12,6 @@ export async function setOrdenArchivada(id: string, archivada: boolean) {
   return prisma.orden.update({
     where: { id },
     data: { archivada_en: archivada ? new Date() : null },
-    include: { pedidos: { select: { id: true } } },
+    include: { pedidos: { select: { id: true, modulos: { select: { linea: true } } } } },
   });
 }

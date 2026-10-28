@@ -12,7 +12,7 @@ const FECHA_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 export function parseEstacion(raw: string): Estacion {
   const e = raw.toUpperCase();
-  if (!(ESTACIONES as readonly string[]).includes(e)) throw new AppError("Estación inválida (lijado, encolado o pvc).", 400);
+  if (!(ESTACIONES as readonly string[]).includes(e)) throw new AppError("Tipo de planilla inválido (lijado, encolado o pvc).", 400);
   return e as Estacion;
 }
 
@@ -37,6 +37,22 @@ export function normalizarColor(v: string): string {
   return v.trim().toUpperCase();
 }
 
+export const MESA_TAMANOS = ["CHICA", "GRANDE"] as const;
+export type MesaTamano = (typeof MESA_TAMANOS)[number];
+export const MAX_PEDIDOS_POR_TANDA = 30;
+
+/** Pedido de una tanda de PVC con las piezas de ese pedido que entraron en la tanda (diseño.md §14.12). */
+export const PedidoTandaSchema = z.object({
+  id: z.string().uuid().optional(),
+  // Un pedido por línea: sin espacios (varios pedidos van cada uno en su propia línea, con «Agregar pedido»).
+  pedido_codigo: z.preprocess(
+    (v) => (typeof v === "string" ? v.trim().toUpperCase() : (v ?? "")),
+    z.string().max(40).refine((s) => !/\s/.test(s), "el N° de pedido no puede llevar espacios (cargá cada pedido por separado)"),
+  ),
+  cantidad_piezas: entero,
+});
+export type PedidoTandaInput = z.infer<typeof PedidoTandaSchema>;
+
 export const FilaSchema = z.object({
   id: z.string().uuid().optional(),
   hora_inicio: hora,
@@ -50,15 +66,17 @@ export const FilaSchema = z.object({
     (v) => (typeof v === "string" && v.trim() !== "" ? normalizarColor(v) : null),
     z.string().max(30).refine((s) => !s.includes("."), "no puede llevar puntos").nullable(),
   ),
-  mesa_chica: entero,
-  mesa_grande: entero,
+  // Solo PVC: la fila es una tanda de mesas (tamaño + cantidad) con sus pedidos. En Lijado/Encolado se ignoran.
+  mesa_tamano: z.preprocess(vacioANull, z.enum(MESA_TAMANOS, { errorMap: () => ({ message: "el tamaño de mesa debe ser CHICA o GRANDE" }) }).nullable()),
+  mesa_cantidad: entero,
+  pedidos: z.array(PedidoTandaSchema).max(MAX_PEDIDOS_POR_TANDA, `una tanda admite hasta ${MAX_PEDIDOS_POR_TANDA} pedidos`).default([]),
 });
 export type FilaInput = z.infer<typeof FilaSchema>;
 
 export const PlanillaBodySchema = z.object({
   estado: z.enum(["BORRADOR", "GUARDADA"]),
-  /** Operarios que trabajaron en esta planilla (elegidos a mano de la lista del área). */
-  operarios: z.array(z.string().trim().min(1).max(60)).max(10).default([]),
+  /** `usuario_id` de las personas que trabajaron en esta planilla (miembros de la estación). */
+  operarios: z.array(z.string().uuid("Un operario no es válido.")).max(40).default([]),
   filas: z.array(FilaSchema).max(60),
 });
 export type PlanillaBody = z.infer<typeof PlanillaBodySchema>;
@@ -68,7 +86,13 @@ export function parsearPlanillaBody(body: unknown): PlanillaBody {
   const r = PlanillaBodySchema.safeParse(body);
   if (r.success) return r.data;
   const issue = r.error.issues[0];
-  const [campo, idx, nombre] = issue.path;
-  const donde = campo === "filas" && typeof idx === "number" ? `Fila ${idx + 1}${nombre ? ` (${String(nombre)})` : ""}: ` : "";
+  const [campo, idx, nombre, idxPedido, nombrePedido] = issue.path;
+  let donde = "";
+  if (campo === "filas" && typeof idx === "number") {
+    donde =
+      nombre === "pedidos" && typeof idxPedido === "number"
+        ? `Fila ${idx + 1}, pedido ${idxPedido + 1}${nombrePedido ? ` (${String(nombrePedido)})` : ""}: `
+        : `Fila ${idx + 1}${nombre ? ` (${String(nombre)})` : ""}: `;
+  }
   throw new AppError(`${donde}${issue.message}`, 400);
 }

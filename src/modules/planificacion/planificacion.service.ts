@@ -4,7 +4,8 @@ import { AppError } from "../../utils/AppError";
 import { AREA_TERMOLAMINADO, fechaISO, parseFecha } from "../planillas/schemas/planilla.schema";
 
 // Planificación semanal de Termolaminado cargada por sistema (diseño.md §14.4): pedidos y reclamos que baja la
-// oficina técnica. Cada usuario de fábrica con un estado de producción asignado puede marcarlo en cada fila.
+// oficina técnica. El estado de producción lo tiene la estación de trabajo: cualquier usuario de la estación (activa)
+// puede marcarlo en cada fila; si está en varias estaciones con estados distintos, puede marcar cualquiera (§17).
 
 const DIA_MS = 86_400_000;
 
@@ -33,13 +34,34 @@ const itemSelect = {
   finalizado_en: true,
   observaciones: true,
   marcas: { select: { estado_id: true, marcado_por: true, marcado_en: true, estado: { select: { nombre: true, color: true } } }, orderBy: { marcado_en: "asc" } },
+  comentarios: {
+    select: {
+      id: true,
+      usuario_id: true,
+      autor: true,
+      texto: true,
+      creado_en: true,
+      editado_en: true,
+      eliminado_en: true,
+      eliminado_por: true,
+      historial: { select: { id: true, accion: true, texto: true, por: true, en: true }, orderBy: { en: "asc" } },
+    },
+    orderBy: { creado_en: "asc" },
+  },
 } satisfies Prisma.PlanificacionItemSelect;
 
 type ItemDB = Prisma.PlanificacionItemGetPayload<{ select: typeof itemSelect }>;
 
 const dia = (d: Date | null) => (d ? fechaISO(d) : null);
 
-function itemDTO(i: ItemDB) {
+/** Quién mira la planificación: define qué observaciones puede editar (las suyas) y borrar (las suyas, o cualquiera si gestiona). */
+export interface Lector {
+  id: string;
+  nombre: string;
+  puedeGestionar: boolean;
+}
+
+function itemDTO(i: ItemDB, lector: Lector) {
   return {
     id: i.id,
     tipo: i.tipo,
@@ -58,19 +80,43 @@ function itemDTO(i: ItemDB) {
     finalizado_en: dia(i.finalizado_en),
     observaciones: i.observaciones,
     marcas: i.marcas.map((m) => ({ estado_id: m.estado_id, estado: m.estado.nombre, color: m.estado.color, marcado_por: m.marcado_por, marcado_en: m.marcado_en.toISOString() })),
+    // Observaciones de los usuarios (incluye las borradas, con `eliminado_en`, para que figuren en el historial).
+    comentarios: i.comentarios.map((c) => {
+      const propia = c.usuario_id === lector.id;
+      const vigente = c.eliminado_en === null;
+      return {
+        id: c.id,
+        usuario_id: c.usuario_id,
+        autor: c.autor,
+        texto: c.texto,
+        creado_en: c.creado_en.toISOString(),
+        editado_en: c.editado_en?.toISOString() ?? null,
+        eliminado_en: c.eliminado_en?.toISOString() ?? null,
+        eliminado_por: c.eliminado_por,
+        puede_editar: vigente && propia,
+        puede_borrar: vigente && (propia || lector.puedeGestionar),
+        historial: c.historial.map((h) => ({ id: h.id, accion: h.accion, texto: h.texto, por: h.por, en: h.en.toISOString() })),
+      };
+    }),
   };
 }
 
-/** El estado de producción asignado al usuario (null si técnica no le asignó ninguno). */
-export async function estadoDeUsuario(usuarioId: string) {
-  const e = await prisma.usuarioEstadoProduccion.findUnique({ where: { usuario_id: usuarioId }, select: { estado: { select: { id: true, nombre: true, color: true } } } });
-  return e?.estado ?? null;
+/**
+ * Estados de producción que el usuario puede marcar: los de sus estaciones de trabajo activas (diseño.md §17), sin
+ * repetir, en el orden del catálogo. Vacío si ninguna de sus estaciones tiene estado (o si no tiene estaciones).
+ */
+export async function estadosDeUsuario(usuarioId: string) {
+  return prisma.estadoProduccion.findMany({
+    where: { estaciones: { some: { activa: true, usuarios: { some: { usuario_id: usuarioId } } } } },
+    orderBy: [{ orden: "asc" }, { creado_en: "asc" }],
+    select: { id: true, nombre: true, color: true },
+  });
 }
 
-export async function getSemana(semanaRaw: string | undefined, usuarioId: string) {
+export async function getSemana(semanaRaw: string | undefined, lector: Lector) {
   const hoy = parseFecha(fechaISO(new Date()));
   const semana = lunesDe(semanaRaw ? parseFecha(semanaRaw, "La semana") : hoy);
-  const [items, semanas, estados, miEstado] = await Promise.all([
+  const [items, semanas, estados, misEstados] = await Promise.all([
     prisma.planificacionItem.findMany({
       where: { area: AREA_TERMOLAMINADO, semana_inicio: semana, eliminado_en: null },
       select: itemSelect,
@@ -84,14 +130,16 @@ export async function getSemana(semanaRaw: string | undefined, usuarioId: string
       take: 30,
     }),
     prisma.estadoProduccion.findMany({ orderBy: [{ orden: "asc" }, { creado_en: "asc" }], select: { id: true, nombre: true, color: true } }),
-    estadoDeUsuario(usuarioId),
+    estadosDeUsuario(lector.id),
   ]);
   return {
     semana_inicio: fechaISO(semana),
     semanas: semanas.map((s) => fechaISO(s.semana_inicio)),
     estados,
-    mi_estado: miEstado,
-    items: items.map(itemDTO),
+    // Compatibilidad: el primero de `mis_estados` (o null). Con varios, el frontend tiene que usar `mis_estados`.
+    mi_estado: misEstados[0] ?? null,
+    mis_estados: misEstados,
+    items: items.map((i) => itemDTO(i, lector)),
   };
 }
 
@@ -140,17 +188,17 @@ async function itemVigente(id: string) {
   if (!i || i.eliminado_en) throw new AppError("Fila no encontrada.", 404);
 }
 
-export async function crearItem(input: ItemInput) {
+export async function crearItem(input: ItemInput, lector: Lector) {
   const datos = datosDe(input);
   const ultimo = await prisma.planificacionItem.aggregate({
     where: { area: AREA_TERMOLAMINADO, semana_inicio: datos.semana_inicio, tipo: datos.tipo, eliminado_en: null },
     _max: { orden: true },
   });
   const creada = await prisma.planificacionItem.create({ data: { ...datos, orden: (ultimo._max.orden ?? -1) + 1 }, select: itemSelect });
-  return itemDTO(creada);
+  return itemDTO(creada, lector);
 }
 
-export async function actualizarItem(id: string, input: ItemInput) {
+export async function actualizarItem(id: string, input: ItemInput, lector: Lector) {
   await itemVigente(id);
   const datos = datosDe(input);
   const actual = await prisma.planificacionItem.findUnique({ where: { id }, select: { tipo: true, semana_inicio: true } });
@@ -160,7 +208,7 @@ export async function actualizarItem(id: string, input: ItemInput) {
     ? ((await prisma.planificacionItem.aggregate({ where: { area: AREA_TERMOLAMINADO, semana_inicio: datos.semana_inicio, tipo: datos.tipo, eliminado_en: null }, _max: { orden: true } }))._max.orden ?? -1) + 1
     : undefined;
   const u = await prisma.planificacionItem.update({ where: { id }, data: { ...datos, ...(orden === undefined ? {} : { orden }) }, select: itemSelect });
-  return itemDTO(u);
+  return itemDTO(u, lector);
 }
 
 export async function eliminarItem(id: string) {
@@ -168,21 +216,78 @@ export async function eliminarItem(id: string) {
   await prisma.planificacionItem.update({ where: { id }, data: { eliminado_en: new Date() } });
 }
 
-/** Marca o desmarca, en una fila, el estado de producción que técnica le asignó al usuario. */
-export async function marcarEstado(itemId: string, usuarioId: string, usuarioNombre: string, marcado: boolean) {
+/**
+ * Marca o desmarca, en una fila, uno de los estados de producción de las estaciones del usuario. `estadoId` es
+ * opcional si el usuario tiene un solo estado posible; con varios es obligatorio.
+ */
+export async function marcarEstado(itemId: string, lector: Lector, marcado: boolean, estadoId?: string) {
   await itemVigente(itemId);
-  const estado = await estadoDeUsuario(usuarioId);
-  if (!estado) throw new AppError("No tenés un estado de producción asignado.", 403);
+  const mios = await estadosDeUsuario(lector.id);
+  if (mios.length === 0) throw new AppError("Tus estaciones de trabajo no tienen un estado de producción asignado.", 403);
+  let estado = mios[0];
+  if (estadoId) {
+    const elegido = mios.find((e) => e.id === estadoId);
+    if (!elegido) throw new AppError("Ese estado no es de ninguna de tus estaciones de trabajo.", 403);
+    estado = elegido;
+  } else if (mios.length > 1) {
+    throw new AppError("Tenés varios estados posibles: elegí cuál marcar (estado_id).", 400);
+  }
   const clave = { item_id_estado_id: { item_id: itemId, estado_id: estado.id } };
   if (marcado) {
     await prisma.planificacionMarca.upsert({
       where: clave,
-      create: { item_id: itemId, estado_id: estado.id, marcado_por: usuarioNombre },
+      create: { item_id: itemId, estado_id: estado.id, marcado_por: lector.nombre },
       update: {},
     });
   } else {
     await prisma.planificacionMarca.deleteMany({ where: { item_id: itemId, estado_id: estado.id } });
   }
   const i = await prisma.planificacionItem.findUnique({ where: { id: itemId }, select: itemSelect });
-  return itemDTO(i!);
+  return itemDTO(i!, lector);
+}
+
+// --- Observaciones de los usuarios (diseño.md §14.13) ---
+
+async function itemConObservaciones(itemId: string, lector: Lector) {
+  const i = await prisma.planificacionItem.findUnique({ where: { id: itemId }, select: itemSelect });
+  return itemDTO(i!, lector);
+}
+
+async function observacionVigente(id: string) {
+  const o = await prisma.planificacionObservacion.findUnique({ where: { id }, select: { id: true, item_id: true, usuario_id: true, texto: true, eliminado_en: true, item: { select: { eliminado_en: true } } } });
+  if (!o || o.eliminado_en || o.item.eliminado_en) throw new AppError("Observación no encontrada.", 404);
+  return o;
+}
+
+/** Agrega una observación a una fila. Cualquier usuario que ve la planificación puede hacerlo; queda firmada con su nombre. */
+export async function agregarObservacion(itemId: string, texto: string, lector: Lector) {
+  await itemVigente(itemId);
+  await prisma.planificacionObservacion.create({
+    data: { item_id: itemId, usuario_id: lector.id, autor: lector.nombre, texto, historial: { create: { accion: "CREADA", texto, por: lector.nombre } } },
+  });
+  return itemConObservaciones(itemId, lector);
+}
+
+/** Edita el texto de una observación propia; cada versión queda en el historial. */
+export async function editarObservacion(id: string, texto: string, lector: Lector) {
+  const o = await observacionVigente(id);
+  if (o.usuario_id !== lector.id) throw new AppError("Solo podés editar tus propias observaciones.", 403);
+  if (o.texto !== texto) {
+    await prisma.planificacionObservacion.update({
+      where: { id },
+      data: { texto, editado_en: new Date(), historial: { create: { accion: "EDITADA", texto, por: lector.nombre } } },
+    });
+  }
+  return itemConObservaciones(o.item_id, lector);
+}
+
+/** Borrado lógico: el autor borra la suya y quien gestiona (técnica) puede borrar cualquiera; queda en el historial. */
+export async function eliminarObservacion(id: string, lector: Lector) {
+  const o = await observacionVigente(id);
+  if (o.usuario_id !== lector.id && !lector.puedeGestionar) throw new AppError("No podés borrar observaciones de otros usuarios.", 403);
+  await prisma.planificacionObservacion.update({
+    where: { id },
+    data: { eliminado_en: new Date(), eliminado_por: lector.nombre, historial: { create: { accion: "ELIMINADA", texto: o.texto, por: lector.nombre } } },
+  });
+  return itemConObservaciones(o.item_id, lector);
 }

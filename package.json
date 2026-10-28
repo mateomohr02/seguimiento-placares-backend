@@ -15,6 +15,7 @@
     "texturas3d:sincronizar": "tsx scripts/texturas-3d-sincronizar.ts",
     "escenas3d:reinterpretar": "tsx scripts/escenas-3d-reinterpretar.ts",
     "escenas3d:probar": "tsx scripts/escenas-3d-probar.ts",
+    "partidas:completar": "tsx scripts/partidas-completar.ts",
     "termolaminado:sembrar": "tsx scripts/termolaminado-sembrar.ts"
   },
   "dependencies": {

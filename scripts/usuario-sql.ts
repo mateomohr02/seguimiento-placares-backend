@@ -1,4 +1,5 @@
-// Genera el INSERT para dar de alta un usuario a mano (diseño.md §12):
+// El alta normal de usuarios es desde la app (técnica, /api/usuarios). Esto queda para emergencias (ej. el primer
+// admin de una base nueva): genera el INSERT para dar de alta un usuario a mano (diseño.md §12; apellido queda '').
 //   npm run usuario:sql -- "<nombre>" <rol> <pin>
 // Pegar el resultado en psql / pgAdmin / Prisma Studio. Roles: admin, tecnica, fabrica, gerencia.
 import { PIN_REGEX } from "../src/modules/auth/pin";

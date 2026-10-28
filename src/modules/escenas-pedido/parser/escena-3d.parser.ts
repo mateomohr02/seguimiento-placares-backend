@@ -11,7 +11,43 @@ import { evaluar, grupos, oculto, type Entorno } from "./expresion";
 // base, así se puede re-interpretar).
 type Vec3 = [number, number, number];
 
-export const PARSER_VERSION = 29;
+// v41: (1) los marcos de nodo (`ang(a,b,c)` de un contenedor, p. ej. la tapa de una «repisa tipo cajón con puerta superior» `ang(90,180,0)`) se
+// componen en el orden de TeoWin para los herrajes (Rx·Ry·Rz), no Rz·Ry·Rx: la tapa quedaba detrás del mueble y, al abrirla, apuntaba hacia
+// afuera de la escena (CR-03821, módulos 309, 478, 480, 481 y 482); cambian solo esas tapas y los perfiles `ang(90,90,0)` de 26-02476 (mód. 140);
+// (2) una hoja con bisagras horizontales que cubre el mueble por arriba (tapa) se levanta: el sentido sale de la velocidad vertical de su centro,
+// no del frente; (3) un panel de puerta con ventana pasante (`HOLE` de todo el espesor: frente vidriado, columna despensera de CR-03821 mód. 465)
+// se dibuja como marco de cuatro listones y deja ver el interior (antes: losa maciza más el aro del contorno, sin ventana).
+// v40: se quita la regla de v39 sobre la veta de los `taulerh` sin marca más profundos que anchos: el usuario confirmó en TeoWin que el techo y la base
+// 400×570 del módulo 42 de 26-02502 llevan la veta a lo ancho (L). Un `taulerh` sin marca va siempre a lo ancho.
+// v39: (1) una hoja guardada ABIERTA (`opened` + `ang(0,±A,0)` con A ≈ `anguloAper`) se dibuja cerrada y la anima el giro de siempre (antes se dibujaba
+// abierta 110° y encima giraba: «abre hacia afuera»; y si su pos.x pasaba de 100 se tomaba por corredera y se desplazaba: placar 26-02502); (2) un
+// `taulerh` sin marca claramente más profundo que ancho (P > 1,1·L) lleva la veta a lo largo de la profundidad (techo 400×570 del módulo 42 de
+// 26-02502; un solo dato de TeoWin); (3) la losa de contorno sin sólido (`SWL`/`EN`/`CPT`) se marca del catálogo 636 para que la casilla «Mesada»
+// la oculte.
+// v38: veta de los tableros tal cual TeoWin (campo `v` de la caja, ver CajaEscena): sale del tipo (`taulerh/v/f`), de `orient N` en la cabecera del
+// objeto y de la marca `texV` de la primitiva (veta alterna); y se descarta el trozo de encimera reconstruido que queda dentro de otro módulo
+// (≥ 40 % de su volumen sobre cajas de otros muebles: el piso de un módulo apoyado sobre el bajo, no una mesada).
+// v37: las cajas de las bisagras de un frente abatible (`ang(180,0,±90)` el cuerpo, `ang(90,0,-90)` la placa) se orientan con el orden de giro
+// de TeoWin para los herrajes (X, luego Y, luego Z; `rotacionHerraje`): el cuerpo queda pegado al canto de la hoja (y acompaña su giro) y la placa
+// cuelga del panel superior del hueco (antes: cuerpo 40 mm adentro del canto y placa parada sobre el techo, asomando por encima del mueble).
+// v36: un frente abatible (pistón a gas `ABAT*`) gira sobre su borde superior (o inferior) con un eje paralelo al ancho del mueble: lo dicen sus
+// bisagras de cuerpo, que llevan `ang(180,0,±90)` (el lado largo de la bisagra, el del eje, queda horizontal); antes siempre giraba sobre un eje vertical.
+// v35: un frente `extraible` con herrajes de alambre (cestos `seabre` + `AsiEsAbierto`, familia ACM bajo un `AIP3D`) se anima como un solo
+// cajón: el frente, los rieles y los cestos salen juntos (antes cada cesto corría solo 425 mm y el frente quedaba cerrado). El recorrido es
+// AsiEsAbierto − AsiEsCerrado del cesto (diseño.md §16.4).
+// v34: se descarta el `encim.` propio de un mueble que flota más de 50 mm sobre el tope de su cuerpo (guardado dentro de la carcasa
+// IZ queda Hz más alto; TeoWin no lo muestra): aparecía como un estante de granito dentro de un armario alto apoyado sobre el bajo.
+// v33: los perfiles de aluminio con inglete de las puertas de vidrio (familia PER, `extrude` en un plano a 45° escrito en la línea siguiente a
+// `eti` tras un `mantAngulo`) ahora se dibujan: marco de la hoja, que gira con ella (diseño.md §13.7).
+// v32: la placa de una bisagra de apertura derecha se apoya en la cara interior del lateral (antes quedaba dentro del lateral y
+// asomaba al frente); un contorno de encimera `CPT` sin sólido no se dibuja cuando la encimera ya se reconstruye desde los almacenes
+// de los muebles (salía una mesada doble). El visor deja de listar los módulos de decoración y equipamiento (diseño.md §13.7).
+// v31: bisagras dibujadas como cajas (cuerpo en la hoja y placa en el lateral); el lado de la bisagra y el sentido de giro de una hoja
+// salen de la posición de sus bisagras; un `pos(...)` posterior a una malla ya no pisa la posición del objeto (laterales de cajón
+// Tandembox desplazados); falta de un lateral de cajón (ver diseño.md §13.7).
+// v30: cocinas (catálogo 3): encimera reconstruida cuando el .3d la trae vacía, catálogo de cada pieza
+// siempre explícito si difiere del de su mueble, animaciones sin piezas descartadas (diseño.md §13.7).
+export const PARSER_VERSION = 41;
 
 export interface CajaEscena {
   /** idEscena del módulo al que pertenece (null = no asociada). */
@@ -30,10 +66,15 @@ export interface CajaEscena {
   a?: number;
   /** Opacidad (transp) cuando la pieza es translúcida (vidrio); se omite si es opaca. */
   o?: number;
-  /** Catálogo de la pieza cuando no es el 4 (ej. 658 = puertas, 3 = cocinas): define dónde buscar su textura. */
+  /** Catálogo de la pieza cuando difiere del de su mueble (ej. 658 = puertas, 636 = encimeras): define dónde buscar su textura; si falta es el del mueble. */
   k?: string;
   /** Foto de paisaje (`eti"PSJ"`): la imagen entera cubre la cara y se ve sin sombras. */
   p?: 1;
+  /**
+   * Veta del tablero: eje LOCAL de la caja a lo largo del cual corre (0 = L/x, 1 = H/y, 2 = P/z), según `orient`/`texV` de TeoWin.
+   * Falta = la textura se ve como siempre (escenas anteriores a v38, extrusiones, mesadas, zócalos y marcas no interpretadas).
+   */
+  v?: 0 | 1 | 2;
 }
 
 /** Grupo de piezas que se desplazan juntas: un cajón que se abre o una hoja corrediza. */
@@ -138,6 +179,8 @@ interface Primitiva {
   ang: string[] | null;
   /** Línea `eti""` (sin etiqueta): en una encimera es el hueco de la bacha o la hornalla, no se dibuja. */
   sinEti: boolean;
+  /** Marca `texV` (línea siguiente a la primitiva): veta alterna respecto de la de fábrica. */
+  texV: boolean;
   /** Etiqueta de la línea (`eti"PSJ"`): PSJ es la foto de paisaje que se ve a través de una abertura. */
   etiqueta: string;
 }
@@ -151,6 +194,8 @@ interface MallaCruda {
   v: number[];
   i: number[];
   uv: number[];
+  /** `pos(x,y,z)` que sigue a la malla: su desplazamiento dentro del objeto. */
+  pos?: string[] | null;
 }
 
 class Nodo {
@@ -169,12 +214,19 @@ class Nodo {
   nombreModulo = "";
   /** Marca `nuncavis3d`: la pieza no se dibuja nunca en 3D (se salta con todo lo que cuelga). */
   nuncaVisible = false;
+  /** Marca `almacenCMB`: contenedor oculto de los trozos de encimera de un mueble (TeoWin los une en el objeto `EN`). */
+  almacen = false;
   /** Espesor del tablero (matTablero con la cara 128), si es numérico. */
   espesor: number | null = null;
   /** Condición de `invisibilidad(...)`, se evalúa con las medidas del mueble. */
   invisibilidad: string | null = null;
   /** Marca `seabre`: cajón que se desliza hacia el frente. */
   seAbre = false;
+  /** Marca `extraible`: frente solidario con el herraje interior (cestos, rieles) que sale con él. */
+  extraible = false;
+  /** `AsiEsAbierto(x,y,z)` / `AsiEsCerrado(x,y,z)`: posición del nodo (en el sistema de su padre) abierto y cerrado; "_" = no cambia. */
+  asiAbierto: string[] | null = null;
+  asiCerrado: string[] | null = null;
   /** Marca `corredera`: hoja de puerta corrediza. */
   corredera = false;
   /** anguloAper(n): puerta con bisagra, ángulo máximo de apertura en grados. */
@@ -197,6 +249,10 @@ class Nodo {
   abierto = false;
   /** Marca `esBiblioteca`: la geometría está en el archivo del catálogo de TeoWin, no en la escena. */
   biblioteca = false;
+  /** Marca `hinge`: pieza de bisagra (su geometría real está en la biblioteca de TeoWin, familia BIS3D/BIB3D). */
+  hinge = false;
+  /** `bisName"B"`: la bisagra es la placa fijada al lateral del mueble (sin él es el cuerpo que va en la hoja). */
+  bisPlaca = false;
   bibliotecaCargada = false;
   /** Contorno `camino(R)(0,0)(x,y,z)…` (losas de encimera que TeoWin genera desde el recorrido). */
   camino: Vec3[] = [];
@@ -232,7 +288,7 @@ const NODOS_IGNORADOS = new Set(["mecanizado", "label", "defespigameca", "objpat
 
 const ATTR = /^(eti"|mat"|color\()/;
 const PRIM = /\b(taulerv|taulerh|taulerf|extrudeSp|extrude|tubeSp|tube|revolSp|revol|faceset|face|poly)(\(.*)$/;
-const PRIM_LINEA = /^(taulerv|taulerh|taulerf|extrudeSp|extrude|tubeSp|tube|revolSp|revol)\(/;
+const PRIM_LINEA = /^(?:mantAngulo\s+)*(taulerv|taulerh|taulerf|extrudeSp|extrude|tubeSp|tube|revolSp|revol)\(/;
 
 /** Recorre los grupos `(...)` de una línea a partir de `desde`, sin armar arreglos intermedios. */
 function recorrerGrupos(s: string, desde: number, cb: (g: string) => void) {
@@ -421,6 +477,39 @@ function prismaDeContorno(P: Vec3[], esp: number, sinTapa = false): { v: number[
 }
 
 /**
+ * Perfil de aluminio con inglete (marcos de puertas de vidrio): el contorno (sección del perfil) está escrito sobre el plano del corte a
+ * 45° (x = y o x + y = c) y el perfil se extruye a lo largo de X con el largo `largo` (medida L del objeto): el extremo izquierdo es el
+ * corte dado (x = p.x) y el derecho el simétrico (x = largo - p.x). La sección es (y, z). null si el contorno no tiene esa forma.
+ */
+function prismaDeInglete(Q: Vec3[], largo: number): { v: number[]; i: number[] } | null {
+  if (!(largo > 0.5) || Q.length < 4) return null;
+  const dif = Q.map((q) => q[0] - q[1]);
+  const sum = Q.map((q) => q[0] + q[1]);
+  const rango = (a: number[]) => Math.max(...a) - Math.min(...a);
+  if (rango(dif) > 1e-3 && rango(sum) > 1e-3) return null;
+  const pts = Q.length > 3 && Q[0].every((x, j) => Math.abs(x - Q[Q.length - 1][j]) < 1e-6) ? Q.slice(0, -1) : Q;
+  if (pts.length < 3) return null;
+  const flat: number[] = [];
+  for (const p of pts) flat.push(p[1], p[2]);
+  const tri = earcut(flat);
+  if (tri.length < 3) return null;
+  const n = pts.length;
+  const v: number[] = [];
+  for (const p of pts) v.push(p[0], p[1], p[2]);
+  for (const p of pts) v.push(largo - p[0], p[1], p[2]);
+  const idx: number[] = [];
+  for (let k = 0; k < tri.length; k += 3) {
+    idx.push(tri[k], tri[k + 1], tri[k + 2]);
+    idx.push(n + tri[k], n + tri[k + 2], n + tri[k + 1]);
+  }
+  for (let k = 0; k < n; k++) {
+    const k2 = (k + 1) % n;
+    idx.push(k, k2, n + k, k2, n + k2, n + k);
+  }
+  return { v, i: idx };
+}
+
+/**
  * `extrude`/`extrudeSp` con un contorno plano que no es un rectángulo alineado (marcos de abertura, bordes de
  * bacha, perfiles con relieve) → prisma exacto en el sistema del objeto. null: se dibuja como caja.
  */
@@ -448,6 +537,18 @@ function prismaDePrimitiva(
     }
   }
   const planos = [0, 1, 2].filter((k) => max[k] - min[k] < 1e-6);
+  if (planos.length === 0) {
+    const pi = prismaDeInglete(Q, size[0]);
+    if (!pi) return null;
+    const Ri = pr.ang ? rotacion(...(pr.ang.slice(0, 3).map((x) => ev(x, env) ?? 0) as [number, number, number])) : ID3;
+    for (let k = 0; k < pi.v.length; k += 3) {
+      const q = apply(Ri, [pi.v[k], pi.v[k + 1], pi.v[k + 2]]);
+      pi.v[k] = q[0] + off[0];
+      pi.v[k + 1] = q[1] + off[1];
+      pi.v[k + 2] = q[2] + off[2];
+    }
+    return pi;
+  }
   if (planos.length !== 1) return null;
   const eje = planos[0];
   const [a, b] = [0, 1, 2].filter((k) => k !== eje);
@@ -520,12 +621,18 @@ function parsearArbol(texto: string): Nodo {
     const o = pila[pila.length - 1];
     // `nuncavis3d` e `invisib` (ej. los tiradores de un armario sin tirador): TeoWin no dibuja la pieza.
     if (/\b(nuncavis3d|invisib)\b/.test(t) && !t.startsWith("eti")) o.nuncaVisible = true;
+    if (/\balmacenCMB\b/.test(t) && !t.startsWith("eti")) o.almacen = true;
+    // texV suelto en la línea siguiente a la primitiva (idJq(1) idJqT"…"  texV, o tipoNucleo(0)texV en extrusiones): es de la última primitiva del objeto.
+    if (t.includes("texV") && !t.startsWith("eti") && o.prims.length > 0) o.prims[o.prims.length - 1].texV = true;
     if (!t.startsWith("eti")) {
       if (/\bseabre\b/.test(t)) o.seAbre = true;
       if (/\bcorredera\b/.test(t)) o.corredera = true;
+      if (/\bextraible\b/.test(t) && !t.startsWith("observaciones")) o.extraible = true;
       if (/\besAtrezzo\b/.test(t)) o.atrezzo = true;
       if (/\bopened\b/.test(t)) o.abierto = true;
       if (/\besBiblioteca\b/.test(t)) o.biblioteca = true;
+      if (/\bhinge\b/.test(t)) o.hinge = true;
+      if (/\bbisName"B"/.test(t)) o.bisPlaca = true;
       const aa = /\banguloAper\((\d+(?:\.\d+)?)\)/.exec(t);
       if (aa) o.anguloAper = Number(aa[1]);
       const po = /porcenAperOpn\(([\d.]+)\)/.exec(t);
@@ -539,8 +646,16 @@ function parsearArbol(texto: string): Nodo {
     else if ((m = /^use (\w+)\s*=(.*)$/.exec(t))) o.use[m[1]] = m[2].trim();
     else if ((m = /^param (\w+)\s*=\s*"(.*)"/.exec(t))) o.param[m[1]] = m[2];
     else if (t.startsWith("virtual(")) o.virtual = grupos(t).slice(0, 2);
+    else if (t.startsWith("AsiEsAbierto(")) o.asiAbierto = grupos(t)[0] ?? null;
+    else if (t.startsWith("AsiEsCerrado(")) o.asiCerrado = grupos(t)[0] ?? null;
     else if (t.startsWith("ang(")) o.ang = grupos(t)[0] ?? null;
-    else if (t.startsWith("pos(")) o.pos = grupos(t)[0] ?? null;
+    else if (t.startsWith("pos(")) {
+      // Un `pos(...)` que sigue a las líneas `malla`/`caras` es la posición de la malla dentro del objeto (casi siempre 0,0,0):
+      // no reemplaza la posición del objeto (el `virtual`/`pos` previo); si no, la malla quedaba en el origen del padre.
+      const g = grupos(t)[0] ?? null;
+      if (o.mallaActual) o.mallaActual.pos = g;
+      else o.pos = g;
+    }
     else if ((m = /(?:^|\s)idEscena\((\d+)\)/.exec(t))) o.idEscena = Number(m[1]);
     else if ((m = /^camino\(R\)\([^)]*\)\(([^)]*)\)/.exec(t))) {
       const q = m[1].split(",").map(Number);
@@ -591,6 +706,7 @@ function parsearArbol(texto: string): Nodo {
           ang: angPrim,
           sinEti: /(?:^|\s)eti""/.test(completa),
           etiqueta: /eti"([^"]*)"/.exec(completa)?.[1] ?? "",
+          texV: false,
         });
       }
     } else if (/^(malla|caras|texcoord)\(/.test(t)) {
@@ -641,6 +757,19 @@ function rotacion(ax: number, ay: number, az: number): Mat3 {
   const rz = [cz, -sz, 0, sz, cz, 0, 0, 0, 1];
   return mul(rz, mul(ry, rx));
 }
+/**
+ * Rotación de un herraje (`hinge`): TeoWin compone sus ángulos en el orden inverso al de las piezas (Rx·Ry·Rz, no Rz·Ry·Rx). Solo importa con
+ * dos ejes a la vez: la placa de bisagra derecha `ang(180,-90,0)` (apoyada en el lateral, sin el giro de 180° de la v32) y las de un frente
+ * abatible, `ang(180,0,±90)` el cuerpo (pegado al canto de la hoja) y `ang(90,0,-90)` la placa (colgada del panel superior).
+ */
+function rotacionHerraje(ax: number, ay: number, az: number): Mat3 {
+  const c = (g: number) => Math.cos((g * Math.PI) / 180);
+  const s = (g: number) => Math.sin((g * Math.PI) / 180);
+  const rx = [1, 0, 0, 0, c(ax), -s(ax), 0, s(ax), c(ax)];
+  const ry = [c(ay), 0, s(ay), 0, 1, 0, -s(ay), 0, c(ay)];
+  const rz = [c(az), -s(az), 0, s(az), c(az), 0, 0, 0, 1];
+  return mul(rx, mul(ry, rz));
+}
 const r1 = (n: number) => Math.round(n * 10) / 10;
 const r4 = (n: number) => Math.round(n * 1e4) / 1e4;
 const rv = (v: Vec3): Vec3 => [r1(v[0]), r1(v[1]), r1(v[2])];
@@ -684,6 +813,58 @@ function cajaDeExtrusion(
   // Espesor 0 en el .3d: depende del material del mueble (script del catálogo).
   dim[plano] = size[plano] > 0.5 ? size[plano] : ESPESOR_DEFECTO;
   return [[off[0] + min[0], off[1] + min[1], off[2] + min[2]], dim];
+}
+
+/**
+ * Ventana de un panel de puerta: el panel `PAN` lleva un hijo `HOLE` (recortaCamino) cuyo contorno (`sinTapas`, el aro del moldurado) tiene el
+ * mismo espesor que el panel cuando la ventana lo atraviesa (frente vidriado); si es más fino, es solo un rebaje de la cara y el panel sigue entero.
+ */
+function ventanaDePanel(
+  n: Nodo,
+  env: Entorno,
+  evVec: (g: string[] | undefined, env: Entorno) => Vec3 | null,
+  dim: Vec3,
+): { x0: number; y0: number; x1: number; y1: number; aro: Nodo } | null {
+  const hueco = n.kids.find((k) => k.nombre === "HOLE");
+  const aro = hueco?.kids.find((k) => k.virtual !== null);
+  if (!aro || !aro.virtual) return null;
+  const p = evVec(aro.virtual[0], env);
+  const t = evVec(aro.virtual[1], env);
+  if (!p || !t || t[2] < dim[2] - 0.5 || t[0] < 1 || t[1] < 1) return null;
+  const x0 = Math.max(0, p[0]);
+  const y0 = Math.max(0, p[1]);
+  const x1 = Math.min(dim[0], p[0] + t[0]);
+  const y1 = Math.min(dim[1], p[1] + t[1]);
+  return x1 > x0 && y1 > y0 ? { x0, y0, x1, y1, aro } : null;
+}
+
+/** Los cuatro listones (izquierdo, derecho, inferior y superior) que rodean la ventana de un panel; `off` y `dim` son los del panel entero. */
+function marcoDeVentana(off: Vec3, dim: Vec3, v: { x0: number; y0: number; x1: number; y1: number }): [Vec3, Vec3][] {
+  const caja = (x0: number, y0: number, x1: number, y1: number): [Vec3, Vec3] => [
+    [off[0] + x0, off[1] + y0, off[2]],
+    [x1 - x0, y1 - y0, dim[2]],
+  ];
+  return [caja(0, 0, v.x0, dim[1]), caja(v.x1, 0, dim[0], dim[1]), caja(v.x0, 0, v.x1, v.y0), caja(v.x0, v.y1, v.x1, dim[1])];
+}
+
+/**
+ * Veta de un tablero (`taulerh/v/f`) según TeoWin: `orient N` del objeto + marca `texV` de la primitiva.
+ * Códigos de `orient`: taulerf 4 normal / 1 alterno; taulerh 2 / 6; taulerv 3 / 5. `texV` manda (24 taulerh la traen con el `orient` en un padre).
+ * Veta normal: taulerh a lo ancho (L, 0); taulerv y taulerf vertical (H, 1 = lo que el visor ya hacía: se omite → null). Alterna: gira al otro eje
+ * del plano de la pieza: taulerh y taulerv → profundidad (P, 2); taulerf → ancho (L, 0). PENDIENTE de confirmar en TeoWin la dirección de la
+ * alterna de taulerh/taulerv (taulerf alterno confirmado: frentes de cajón BB2-00078_004). null = sin cambios (extrusiones, orient raros).
+ * Un taulerh SIN marca va a lo ancho (L), sea cual sea su proporción (techo y base 400×570 del módulo 42 de 26-02502, confirmado en TeoWin).
+ * Con marca (alterna) y en taulerv/taulerf el tamaño no cuenta.
+ */
+function vetaDe(n: Nodo, pr: Primitiva, dim: Vec3): 0 | 1 | 2 | null {
+  const normal = pr.tipo === "taulerh" ? 2 : pr.tipo === "taulerv" ? 3 : pr.tipo === "taulerf" ? 4 : null;
+  const alterno = pr.tipo === "taulerh" ? 6 : pr.tipo === "taulerv" ? 5 : pr.tipo === "taulerf" ? 1 : null;
+  if (normal === null || alterno === null) return null;
+  const esAlterno = pr.texV || n.orient === alterno;
+  if (!esAlterno && n.orient !== null && n.orient !== normal) return null;
+  if (esAlterno) return pr.tipo === "taulerf" ? 0 : 2;
+  if (pr.tipo !== "taulerh") return null;
+  return 0;
 }
 
 // Un objeto de primer nivel es un mueble si es de un catálogo de fábrica (no del 1, general, ni del 641,
@@ -741,6 +922,11 @@ function tieneGeometria(n: Nodo): boolean {
   return n.prims.length > 0 || n.meshes.length > 0 || n.kids.some(tieneGeometria);
 }
 
+/** ¿Cuelga del nodo (visible) un herraje que se abre por su `AsiEsAbierto` (cesto, extraíble)? */
+function tieneHerrajeAbierto(n: Nodo): boolean {
+  return n.kids.some((k) => !k.nuncaVisible && ((k.seAbre && k.asiAbierto !== null) || tieneHerrajeAbierto(k)));
+}
+
 function buscarNodo(n: Nodo, nombre: string): Nodo | null {
   for (const k of n.kids) {
     if (k.nombre === nombre) return k;
@@ -760,9 +946,61 @@ function buscarPorcen(n: Nodo): number | null {
   return null;
 }
 
+// Herrajes de bisagra como cajas (en el sistema de la pieza `hinge` ya girada por su `ang`): [desplazamiento, tamaño] en mm.
+// Cuerpo de la hoja (C0CS y afines): placa plana de 66 mm y el cuerpo redondo (copa) que sobresale hacia el interior del mueble.
+const HERRAJE_CUERPO: [Vec3, Vec3][] = [
+  [[0, -33, 0], [37.4, 66, 2.2]],
+  [[3, -17.5, 2.2], [34.4, 35, 9.2]],
+];
+// Placa fijada al lateral: base plana (se apoya en el lateral) y el taco donde engancha el brazo.
+const HERRAJE_PLACA: [Vec3, Vec3][] = [
+  [[0, -25.5, 0], [44.5, 51, 3]],
+  [[4, -10, 3], [36, 20, 5.5]],
+];
+const COLOR_HERRAJE: [number, number, number] = [0.72, 0.74, 0.78];
+
 // Espesor por defecto cuando una medida depende de un material (GRCI="matci"): ese
 // valor vive en los scripts del catálogo, no en el .3d.
 const ESPESOR_DEFECTO = 18;
+
+// Solo para escenas que no traen catálogo (pieza sin `k` y sin mueble): el parser siempre lo declara, esto es un respaldo.
+const CAT_DEFECTO = "4";
+
+/**
+ * Bisagras de cuerpo (40,4 mm de ancho) que cuelgan de una hoja con bisagra: centro (x, y locales de la hoja) y orientación del eje de
+ * giro, o null si no tiene (puertas de otros catálogos, bisagras que no son del tipo clásico). Una bisagra izquierda se coloca en
+ * `virtual(40.4,…) ang(0,180,0)` y una derecha en `virtual(L-pl,…) ang(180,0,0)`: el cuerpo (37,4 mm de ancho) siempre queda hacia el
+ * interior de la hoja y su lado largo (66 mm, Y local) corre a lo largo del eje de la bisagra. Un frente abatible (hacia arriba o hacia
+ * abajo, con pistón a gas) lleva las bisagras giradas `ang(180,0,±90)`: ese lado largo queda horizontal, o sea el eje es paralelo al
+ * ancho de la hoja (`horizontal`).
+ */
+function bisagrasHoja(hoja: Nodo, env: Entorno): { x: number; y: number; horizontal: boolean } | null {
+  const xs: number[] = [];
+  const ys: number[] = [];
+  let horiz = 0;
+  const e: Entorno = { ...env };
+  const rec = (k: Nodo) => {
+    for (const h of k.kids) {
+      if (h.hinge && !h.bisPlaca && h.virtual) {
+        const p = h.virtual[0]?.slice(0, 3).map((x) => evaluar(x, e));
+        const s = h.virtual[1]?.slice(0, 3).map((x) => evaluar(x, e));
+        if (p && s && !p.includes(null) && s[0] !== null && Math.abs(s[0] - 40.4) < 0.1) {
+          const a = (h.ang ?? []).slice(0, 3).map((x) => evaluar(x, e) ?? 0);
+          const R = rotacionHerraje(a[0] ?? 0, a[1] ?? 0, a[2] ?? 0);
+          const d = apply(R, [20.2, 0, 0]);
+          const largo = apply(R, [0, 1, 0]);
+          xs.push((p[0] as number) + d[0]);
+          ys.push((p[1] as number) + d[1]);
+          if (Math.abs(largo[0]) > Math.abs(largo[1])) horiz++;
+        }
+      } else if (!h.hinge) rec(h);
+    }
+  };
+  rec(hoja);
+  if (!xs.length) return null;
+  const prom = (v: number[]) => v.reduce((a, b) => a + b, 0) / v.length;
+  return { x: prom(xs), y: prom(ys), horizontal: horiz * 2 > xs.length };
+}
 
 /** Opciones del intérprete: `biblioteca` devuelve el texto del `.3d` de un objeto de la biblioteca de TeoWin. */
 export interface OpcionesInterprete {
@@ -775,6 +1013,13 @@ export function interpretarEscena3D(texto: string, opciones: OpcionesInterprete 
     version3d: /^\/\/version (.+)$/m.exec(texto)?.[1]?.trim() ?? null,
   };
   const raiz = parsearArbol(texto);
+  // Material de encimera por defecto de la escena: `hdrDataLin <636 EN;MIT/BLANCO_NORTE/BNO>` (catálogo 636, código BNO).
+  // Las piezas de encimera que traen el marcador `enci` se dibujan con él.
+  const hdrEncimera = (() => {
+    const lin = /^\s*hdrDataLin (.*)$/m.exec(texto)?.[1] ?? "";
+    const m = /<636 EN;[^/>]*\/[^/>]*\/([^>]+)>/.exec(lin);
+    return m ? `<636>${m[1].trim()}` : null;
+  })();
   const globales = raiz.globales;
   const escena = raiz.kids[0];
   const out: Escena3D = {
@@ -805,6 +1050,10 @@ export function interpretarEscena3D(texto: string, opciones: OpcionesInterprete 
   };
 
   const inicioParedes: [number, number][] = [];
+
+  // Catálogo de cada mueble (4 = Placares, 3 = Cocinas…). Una pieza lleva `k` (su catálogo) siempre que difiera del de su
+  // mueble: así nunca se supone el de Placares para una pieza de Cocinas (los códigos de color se repiten entre catálogos).
+  const catDeModulo = new Map<number, string>();
 
   // Variables que en el .3d valen "el espesor del material de esta pieza" (mymat, y los GRxx = "matxx"):
   // su valor real está en el matTablero de cada pieza, no en un parámetro.
@@ -845,10 +1094,30 @@ export function interpretarEscena3D(texto: string, opciones: OpcionesInterprete 
       ...(c.uv ? { uv: c.uv } : {}),
       ...(anim !== null ? { a: anim } : {}),
       ...(datos.opacidad !== null ? { o: datos.opacidad } : {}),
-      ...(cat !== "4" ? { k: cat } : {}),
+      ...(cat !== catDeModulo.get(id ?? -1) ? { k: cat } : {}),
       ...(/paisaje|skyline/i.test(nombre) || /^(skyline|paisaje)/i.test(datos.m) ? { e: 1 as const } : {}),
     });
   };
+
+  // Cajas de bisagra (se dibujan solo si la hoja a la que acompañan se dibuja).
+  const cajasHerraje = new WeakSet<CajaEscena>();
+
+  // Cocinas: ¿viene vacío el objeto de primer nivel EN (encimera)? Entonces se arma con los trozos que guarda cada mueble.
+  let reconEncimera = false;
+  /** Cajas de la encimera reconstruida desde los almacenes (para detectar contornos `CPT` que dibujarían una segunda mesada encima). */
+  const cajasRecon: CajaEscena[] = [];
+  /** Losas hechas con el contorno de un `CPT`/`EN` sin sólido: se descartan al final las que la encimera reconstruida ya cubre. */
+  const losasContorno: { malla: MallaEscena; poli: [number, number][] }[] = [];
+  /** El mueble que se está recorriendo ya trae su encimera a la vista (no se repite la del almacén). */
+  let moduloConEncimera = false;
+  const reconDibujadas = new Set<string>();
+  /** Trozos de encimera propios de un mueble (`encim.`), para descartar los que flotan sobre su cuerpo (ver el final). */
+  const encimasModulo: CajaEscena[] = [];
+
+  /** Animaciones de frentes `extraible` (índice → ya se fijó su recorrido con el cesto). */
+  const extraibles = new Map<number, boolean>();
+  /** `anguloAper` de cada animación de giro (para reconocer la hoja hija guardada abierta, ver `caminar`). */
+  const aperGiro = new Map<number, number>();
 
   const caminar = (
     n: Nodo,
@@ -861,10 +1130,17 @@ export function interpretarEscena3D(texto: string, opciones: OpcionesInterprete 
     catPadre: string,
     enCorr = false,
     marcoPadre: { M: Mat3; T: Vec3; L: number } | null = null,
+    recon: "EN" | null = null,
   ) => {
     // Las patas (objeti PAT) quedan bajo el zócalo y TeoWin no las muestra desde afuera: no se dibujan.
     // Las fuentes de luz (objeti LZ: el cono amarillo de una lámpara) no se dibujan: TeoWin solo muestra la lámpara.
-    if (NODOS_IGNORADOS.has(n.nombre) || n.nuncaVisible || n.objeti === "PAT" || n.objeti === "LZ") return;
+    if (NODOS_IGNORADOS.has(n.nombre) || n.objeti === "PAT" || n.objeti === "LZ") return;
+    // Cocinas: cuando el objeto de primer nivel EN (encimera) viene vacío en el .3d (`nTrozosSaved` sin hijos), TeoWin la arma
+    // al abrir la escena con los trozos que cada mueble guarda ocultos (`encim.` dentro de un `almacenCMB`, nuncavis3d): se
+    // dibujan esos trozos (y solo ellos) para que las bases no queden sin tapa. Con el zócalo no se hace lo mismo: solo
+    // algunos muebles traen su pieza y quedaría a medias (los ZC vacíos se dejan como están).
+    if (recon === null && n.nuncaVisible && n.almacen && reconEncimera && !moduloConEncimera) recon = "EN";
+    if (n.nuncaVisible && recon === null) return;
     // Objeto de la biblioteca de TeoWin (atrezzo) sin geometría en la escena: se toma del archivo del catálogo.
     if (n.biblioteca && !n.bibliotecaCargada && opciones.biblioteca && !tieneGeometria(n)) {
       n.bibliotecaCargada = true;
@@ -905,6 +1181,7 @@ export function interpretarEscena3D(texto: string, opciones: OpcionesInterprete 
       }
     }
     if (n.idrep !== null) env.idrep = n.idrep;
+    env.pl = env.pl ?? 40.4; // largo de la placa de bisagra: la bisagra de una hoja se ubica en L-pl
     env.getcxh = env.getcxh ?? 0; // altura propia de un cajón/frente: 0 = la del mueble (cmp[getcxh;0;=]*H+getcxh)
     env.mymat = env.mymat ?? ESPESOR_DEFECTO;
     if (n.espesor !== null && n.espesor > 0) for (const v of espesorVars) env[v] = n.espesor;
@@ -934,7 +1211,17 @@ export function interpretarEscena3D(texto: string, opciones: OpcionesInterprete 
     let R = ID3;
     if (n.ang) {
       const a = n.ang.slice(0, 3).map((x) => ev(x, env) ?? 0);
-      R = rotacion(a[0], a[1], a[2]);
+      R = rotacionHerraje(a[0], a[1], a[2]);
+      // Hoja con bisagra guardada ABIERTA (`opened` + `ang(0,±A,0)` con A ≈ anguloAper, en la hoja o en su contenedor `C0` ya animado
+      // como giro): TeoWin trae la hoja girada A grados con su `virtual` desplazado al punto de giro. Se dibuja cerrada (sin giro y en el
+      // origen del contenedor, donde está la de una hoja guardada cerrada) y la animación de giro la abre desde ahí.
+      if (n.abierto && Math.abs(a[0]) < 0.01 && Math.abs(a[2]) < 0.01 && Math.abs(a[1]) >= 30 && Math.abs(a[1]) <= 180) {
+        const aper = n.anguloAper ?? (animPadre !== null && out.animaciones[animPadre]?.tipo === "giro" ? aperGiro.get(animPadre) ?? null : null);
+        if (aper !== null && Math.abs(Math.abs(a[1]) - aper) < 2) {
+          R = ID3;
+          pos = [0, 0, 0];
+        }
+      }
     }
     const M2 = mul(M, R);
     const d0 = apply(M, pos);
@@ -948,9 +1235,36 @@ export function interpretarEscena3D(texto: string, opciones: OpcionesInterprete 
     // Los catálogos de decoración y equipamiento (encimeras, electrodomésticos, puertas y ventanas, lámparas…)
     // no se animan: ni se mueven solos ni acompañan a un mueble que se abre.
     const sinAnim = SIN_ANIMACION.has(cat);
-    let anim = sinAnim ? null : animPadre;
-    if (enModulo && !sinAnim) {
-      if (n.seAbre && enCorr && envPadre.L !== undefined && env.L !== undefined && envPadre.L - env.L >= 1) {
+    let anim = sinAnim || recon !== null ? null : animPadre;
+    if (enModulo && !sinAnim && recon === null) {
+      if (n.extraible && !enCorr && tieneHerrajeAbierto(n)) {
+        // Frente `extraible` con herraje de alambre (cestos, rieles): TeoWin lo saca como un solo cajón. El frente y todo lo que cuelga de
+        // él comparten esta animación; el recorrido sale del primer cesto que trae `AsiEsAbierto` (ver el caso siguiente).
+        const e = apply(M, [0, 0, 1]);
+        out.animaciones.push({ tipo: "cajon", mod: id, eje: [r4(e[0]), r4(e[1]), r4(e[2])], dist: 0 });
+        anim = out.animaciones.length - 1;
+        extraibles.set(anim, false);
+      } else if (n.seAbre && animPadre !== null && extraibles.has(animPadre)) {
+        // Cesto (u otra pieza `seabre`) dentro de un frente extraible: no se anima por su cuenta, sale con el frente. Su `AsiEsAbierto`
+        // (posición abierta, en el sistema del padre; "_" = no cambia) menos `AsiEsCerrado` (o su propia posición) es el recorrido.
+        if (!extraibles.get(animPadre)) {
+          extraibles.set(animPadre, true);
+          const comp = (g: string[] | null, k: number) => (g && g[k] && g[k] !== "_" ? ev(g[k], envPadre) : null);
+          const d: Vec3 = [0, 0, 0];
+          for (let k = 0; k < 3; k++) {
+            const a = comp(n.asiAbierto, k);
+            if (a !== null) d[k] = a - (comp(n.asiCerrado, k) ?? pos[k]);
+          }
+          const largo = Math.hypot(d[0], d[1], d[2]);
+          const dir: Vec3 = largo > 1 ? [d[0] / largo, d[1] / largo, d[2] / largo] : [0, 0, 1];
+          const e = apply(M, dir);
+          out.animaciones[animPadre] = {
+            ...out.animaciones[animPadre],
+            eje: [r4(e[0]), r4(e[1]), r4(e[2])],
+            dist: r1(largo > 1 ? largo : (n.porcen ?? 0.85) * (env.P > 0 ? env.P : 0)),
+          };
+        }
+      } else if (n.seAbre && enCorr && envPadre.L !== undefined && env.L !== undefined && envPadre.L - env.L >= 1) {
         // Hoja de una puerta de paso corrediza: corre en el plano de la puerta (X), no hacia el frente.
         const sentido = pos[0] + env.L / 2 < envPadre.L / 2 ? 1 : -1;
         const e = apply(M, [sentido, 0, 0]);
@@ -969,18 +1283,52 @@ export function interpretarEscena3D(texto: string, opciones: OpcionesInterprete 
         const pB: Vec3 = [T2[0] + dB[0], T2[1] + dB[1], T2[2] + dB[2]];
         const xa = xPar(pA);
         const xb = xPar(pB);
-        const izquierda = (xa + xb) / 2 <= mk.L / 2 + 1;
-        const bisagra = izquierda ? (xa <= xb ? pA : pB) : xa >= xb ? pA : pB;
-        const eje = apply(mk.M, [0, 1, 0]);
+        // El lado de la bisagra lo dicen las bisagras que cuelgan de la hoja (TeoWin las dibuja ahí): una hoja de ancho completo
+        // de un mueble de una sola puerta tiene su centro justo en el medio y la posición no alcanza (`apertura 2` = bisagra a la derecha).
+        const bis = bisagrasHoja(n, env);
+        const cb = bis ? bis.x : null;
+        let izquierda: boolean;
+        let bisagra: Vec3;
+        if (cb !== null) {
+          bisagra = cb < env.L / 2 ? pA : pB;
+          izquierda = bisagra === pA ? xa <= xb : xb <= xa;
+        } else {
+          izquierda = (xa + xb) / 2 <= mk.L / 2 + 1;
+          bisagra = izquierda ? (xa <= xb ? pA : pB) : xa >= xb ? pA : pB;
+        }
         const grados = n.anguloAper * (buscarPorcen(n) ?? 0.85);
-        out.animaciones.push({
-          tipo: "giro",
-          mod: id,
-          eje: [r4(eje[0]), r4(eje[1]), r4(eje[2])],
-          pivote: rv(bisagra),
-          dist: r1(izquierda ? -grados : grados),
-        });
+        if (bis !== null && bis.horizontal) {
+          // Frente abatible (pistón a gas): bisagras en el borde superior (o inferior) con el eje paralelo al ancho de la hoja. Gira sobre
+          // ese borde hacia el frente del mueble (+Z); el sentido sale de la velocidad del centro de la hoja (eje × radio).
+          const eje = apply(M2, [1, 0, 0]);
+          const borde = apply(M2, [0, bis.y >= env.H / 2 ? env.H : 0, 0]);
+          const centro = apply(M2, [env.L / 2, env.H / 2, 0]);
+          const rad = [centro[0] - borde[0], centro[1] - borde[1], centro[2] - borde[2]];
+          const fr = apply(mk.M, [0, 0, 1]);
+          const vel = [eje[1] * rad[2] - eje[2] * rad[1], eje[2] * rad[0] - eje[0] * rad[2], eje[0] * rad[1] - eje[1] * rad[0]];
+          // Una tapa horizontal (hoja que cubre el mueble por arriba: «repisa tipo cajón con puerta superior») se levanta; la velocidad de su
+          // centro es vertical y no dice nada del frente.
+          const tapa = Math.abs(rad[1]) < 0.25 * Math.hypot(rad[0], rad[1], rad[2]);
+          const sentido = (tapa ? vel[1] : vel[0] * fr[0] + vel[1] * fr[1] + vel[2] * fr[2]) >= 0 ? 1 : -1;
+          out.animaciones.push({
+            tipo: "giro",
+            mod: id,
+            eje: [r4(eje[0]), r4(eje[1]), r4(eje[2])],
+            pivote: rv([T2[0] + borde[0], T2[1] + borde[1], T2[2] + borde[2]]),
+            dist: r1(sentido * grados),
+          });
+        } else {
+          const eje = apply(mk.M, [0, 1, 0]);
+          out.animaciones.push({
+            tipo: "giro",
+            mod: id,
+            eje: [r4(eje[0]), r4(eje[1]), r4(eje[2])],
+            pivote: rv(bisagra),
+            dist: r1(izquierda ? -grados : grados),
+          });
+        }
         anim = out.animaciones.length - 1;
+        aperGiro.set(anim, n.anguloAper);
       } else if (n.seAbre && !enCorr && env.P > 0) {
         const e = apply(M, [0, 0, 1]);
         out.animaciones.push({ tipo: "cajon", mod: id, eje: [r4(e[0]), r4(e[1]), r4(e[2])], dist: r1((n.porcen ?? 0.85) * env.P) });
@@ -1001,7 +1349,45 @@ export function interpretarEscena3D(texto: string, opciones: OpcionesInterprete 
       }
     }
 
+    // Bisagras (familia BIS3D/BIB3D): el cuerpo que va en la hoja (40,4×66) y la placa del lateral (8,5×51×44,5) se dibujan como cajas
+    // chicas; la hoja las lleva consigo al girar (heredan su animación). Los otros herrajes (elevables, pistones, push) no se dibujan.
+    if (n.hinge && enModulo && recon === null && env.L !== undefined && env.H !== undefined && env.P !== undefined) {
+      const mide = (a: number, b: number, c: number) => Math.abs(env.L - a) < 0.1 && Math.abs(env.H - b) < 0.1 && Math.abs(env.P - c) < 0.1;
+      const partes = mide(40.4, 66, 14.5) ? HERRAJE_CUERPO : mide(8.5, 51, 44.5) ? HERRAJE_PLACA : null;
+      // La placa se apoya en la cara interior del lateral y se extiende hacia el fondo del mueble. Con `ang(0,90,0)` (lateral
+      // izquierdo) el grosor de la placa (+Z local) entra al mueble; con `ang(180,-90,0)` (lateral derecho) el marco queda
+      // espejado y la placa entraba en el lateral y asomaba al frente: se gira 180° sobre su eje vertical.
+      let Rh = M2;
+      if (n.ang) {
+        const a = n.ang.slice(0, 3).map((x) => ev(x, env) ?? 0);
+        Rh = mul(M, rotacionHerraje(a[0], a[1], a[2]));
+      }
+      if (partes === HERRAJE_PLACA && marco) {
+        const ex = apply(marco.M, [1, 0, 0]);
+        const xl = (T2[0] - marco.T[0]) * ex[0] + (T2[1] - marco.T[1]) * ex[1] + (T2[2] - marco.T[2]) * ex[2];
+        const adentro: Vec3 = xl < marco.L / 2 ? ex : [-ex[0], -ex[1], -ex[2]];
+        const z = apply(Rh, [0, 0, 1]);
+        if (z[0] * adentro[0] + z[1] * adentro[1] + z[2] * adentro[2] < -0.5) Rh = mul(Rh, rotacion(0, 180, 0));
+      }
+      for (const [off, dim] of partes ?? []) {
+        const o = apply(Rh, off);
+        const caja: CajaEscena = {
+          mod: id,
+          m: "",
+          c: COLOR_HERRAJE,
+          t: rv([T2[0] + o[0], T2[1] + o[1], T2[2] + o[2]]),
+          r: Rh.map((x) => Math.round(x * 1e4) / 1e4),
+          s: dim,
+          ...(anim !== null ? { a: anim } : {}),
+        };
+        cajasHerraje.add(caja);
+        out.cajas.push(caja);
+      }
+    }
+
     for (const pr of n.prims) {
+      // En una reconstrucción solo cuentan las piezas del propio encim.
+      if (recon !== null && (n.objeti !== recon || (pr.tipo !== "extrude" && pr.tipo !== "extrudeSp") || pr.sinEti)) continue;
       if (pr.invisible) continue;
       if (pr.tipo === "faceset" || pr.tipo === "face") {
         const esCara = n.objeti === "TQC" || n.objeti === "CLC";
@@ -1131,43 +1517,94 @@ export function interpretarEscena3D(texto: string, opciones: OpcionesInterprete 
           dim = evVec(pr.args[1], env);
         }
         if (!off || !dim) continue;
-        // Volúmenes auxiliares (sin material ni color propio) y piezas planas (rieles
-        // de 0 mm de espesor) no se dibujan: TeoWin tampoco las muestra como sólidos.
-        if (!n.atrezzo && pr.m === "" && pr.c && pr.c[0] === 1 && pr.c[1] === 1 && pr.c[2] === 1) continue;
-        if (Math.min(dim[0], dim[1], dim[2]) < 0.5) continue;
-        const o = apply(M2, off);
-        let Mc = M2;
-        if (pr.ang) {
-          const a = pr.ang.slice(0, 3).map((x) => ev(x, env) ?? 0);
-          Mc = mul(M2, rotacion(a[0] ?? 0, a[1] ?? 0, a[2] ?? 0));
+        // Panel de puerta con una ventana pasante (`HOLE` del mismo espesor que el panel: frente vidriado): se dibuja como el marco de cuatro
+        // listones alrededor de la ventana, y el aro de su contorno (`sinTapas`) no se dibuja (era una caja maciza que la tapaba).
+        const ventana = n.objeti === "PAN" ? ventanaDePanel(n, env, evVec, dim) : null;
+        const partes: [Vec3, Vec3][] = ventana
+          ? marcoDeVentana(off, dim, ventana)
+          : [[off, dim]];
+        if (ventana) ventana.aro.nuncaVisible = true;
+        for (const [offP, dimP] of partes) {
+          // Volúmenes auxiliares (sin material ni color propio) y piezas planas (rieles
+          // de 0 mm de espesor) no se dibujan: TeoWin tampoco las muestra como sólidos.
+          if (!n.atrezzo && pr.m === "" && pr.c && pr.c[0] === 1 && pr.c[1] === 1 && pr.c[2] === 1) continue;
+          if (Math.min(dimP[0], dimP[1], dimP[2]) < 0.5) continue;
+          const o = apply(M2, offP);
+          let Mc = M2;
+          if (pr.ang) {
+            const a = pr.ang.slice(0, 3).map((x) => ev(x, env) ?? 0);
+            Mc = mul(M2, rotacion(a[0] ?? 0, a[1] ?? 0, a[2] ?? 0));
+          }
+          if (recon !== null) {
+            // Un almacén guarda varios trozos del mismo módulo en el mismo lugar (los de cada variante de corte): se dibuja uno.
+            const dup = `${id}|${pr.m}|${rv([T2[0] + o[0], T2[1] + o[1], T2[2] + o[2]]).join()}|${dim.join()}|${Mc.join()}`;
+            if (reconDibujadas.has(dup)) continue;
+            reconDibujadas.add(dup);
+          }
+          const cajaNueva: CajaEscena = {
+            mod: id,
+            m: n.objeti === "EN" && pr.m === "enci" && hdrEncimera ? hdrEncimera : pr.m,
+            c: pr.c,
+            t: rv([T2[0] + o[0], T2[1] + o[1], T2[2] + o[2]]),
+            r: Mc.map((x) => Math.round(x * 1e4) / 1e4),
+            s: [r1(dimP[0]), r1(dimP[1]), r1(dimP[2])],
+            ...(anim !== null ? { a: anim } : {}),
+            ...(pr.opacidad !== null ? { o: pr.opacidad } : {}),
+            ...(cat !== catDeModulo.get(id ?? -1) ? { k: cat } : {}),
+            ...(pr.etiqueta === "PSJ" ? { p: 1 as const } : {}),
+            ...(vetaDe(n, pr, dim) !== null && !(cat === "636" && n.objeti === "EN") && recon === null && n.objeti !== "ZC" && pr.m !== "enci" && pr.etiqueta !== "PSJ"
+              ? { v: vetaDe(n, pr, dim) as 0 | 1 | 2 }
+              : {}),
+          };
+          out.cajas.push(cajaNueva);
+          if (recon !== null) cajasRecon.push(cajaNueva);
+          if (n.objeti === "EN" && id !== null && cat === catDeModulo.get(id)) encimasModulo.push(cajaNueva);
         }
-        out.cajas.push({
-          mod: id,
-          m: pr.m,
-          c: pr.c,
-          t: rv([T2[0] + o[0], T2[1] + o[1], T2[2] + o[2]]),
-          r: Mc.map((x) => Math.round(x * 1e4) / 1e4),
-          s: [r1(dim[0]), r1(dim[1]), r1(dim[2])],
-          ...(anim !== null ? { a: anim } : {}),
-          ...(pr.opacidad !== null ? { o: pr.opacidad } : {}),
-          ...(cat !== "4" ? { k: cat } : {}),
-          ...(pr.etiqueta === "PSJ" ? { p: 1 as const } : {}),
-        });
       }
     }
-    if (enModulo && n.camino.length >= 3 && !tieneGeometria(n) && (n.objeti === "SWL" || n.objeti === "EN" || n.objeti === "CPT")) {
+    if (enModulo && recon === null && n.camino.length >= 3 && !tieneGeometria(n) && (n.objeti === "SWL" || n.objeti === "EN" || n.objeti === "CPT")) {
       // Encimera sin sólido en el .3d: TeoWin la genera desde el recorrido (cara inferior a 870 mm, 30 mm de espesor).
       const losa = prismaDeContorno(n.camino, 30);
-      if (losa) emitirMalla({ v: losa.v, i: losa.i, uv: null }, { m: "", c: [0.93, 0.93, 0.93], opacidad: null }, M2, T2, id, anim, cat, n.nombre);
-    }
-    if (enModulo) {
-      for (const mc of n.meshes) {
-        if (mc.invisible) continue;
-        emitirMalla({ v: mc.v, i: mc.i, uv: mc.uv }, { m: mc.m, c: mc.c, opacidad: mc.opacidad }, M2, T2, id, anim, cat, n.nombre);
+      if (losa) {
+        const antes = out.mallas.length;
+        // Es una pieza de mesada: se marca del catálogo 636 para que la casilla «Mesada» del visor la oculte (antes, con el catálogo del
+        // mueble, no llevaba `k` y la casilla no la ocultaba).
+        emitirMalla({ v: losa.v, i: losa.i, uv: null }, { m: "", c: [0.93, 0.93, 0.93], opacidad: null }, M2, T2, id, anim, "636", n.nombre);
+        if (out.mallas.length > antes && n.objeti !== "SWL") {
+          // Contorno en planta (x, z de la escena) para el control de cobertura del final.
+          const poli = n.camino.map((q): [number, number] => {
+            const d = apply(M2, q);
+            return [T2[0] + d[0], T2[2] + d[2]];
+          });
+          losasContorno.push({ malla: out.mallas[out.mallas.length - 1], poli });
+        }
       }
     }
-    for (const k of n.kids) caminar(k, env, M2, T2, id, enModulo, anim, cat, enCorr || (n.corredera && n.objeti === "PT"), marco);
+    if (enModulo && recon === null) {
+      for (const mc of n.meshes) {
+        if (mc.invisible) continue;
+        const dm = mc.pos ? evVec(mc.pos, env) : null;
+        if (dm && (dm[0] !== 0 || dm[1] !== 0 || dm[2] !== 0)) {
+          // La malla no se muta (el mismo nodo puede recorrerse más de una vez): se desplaza una copia.
+          const v2 = mc.v.slice();
+          for (let k = 0; k + 2 < v2.length; k += 3) {
+            v2[k] += dm[0];
+            v2[k + 1] += dm[1];
+            v2[k + 2] += dm[2];
+          }
+          emitirMalla({ v: v2, i: mc.i, uv: mc.uv }, { m: mc.m, c: mc.c, opacidad: mc.opacidad }, M2, T2, id, anim, cat, n.nombre);
+          continue;
+        }
+        emitirMalla({ v: mc.v, i: mc.i, uv: mc.uv },{ m: mc.m, c: mc.c, opacidad: mc.opacidad }, M2, T2, id, anim, cat, n.nombre);
+      }
+    }
+    for (const k of n.kids) caminar(k, env, M2, T2, id, enModulo, anim, cat, enCorr || (n.corredera && n.objeti === "PT"), marco, recon);
   };
+
+  const sinContenido = (nodos: Nodo[]) => nodos.length > 0 && nodos.every((k) => !tieneGeometria(k) && k.camino.length < 3);
+  reconEncimera = sinContenido(escena.kids.filter((k) => k.objeti === "EN" && k.catalogo === "1"));
+  const encimeraVisible = (n: Nodo): boolean =>
+    n.kids.some((c) => !c.nuncaVisible && ((c.objeti === "EN" && c.prims.some((q) => !q.invisible && !q.sinEti)) || encimeraVisible(c)));
 
   for (const k of escena.kids) {
     if (k.idEscena === null) continue;
@@ -1187,6 +1624,8 @@ export function interpretarEscena3D(texto: string, opciones: OpcionesInterprete 
         frente: frenteDe(k),
         dim: [env.L ?? 0, env.H ?? 0, env.P ?? 0],
       });
+      moduloConEncimera = encimeraVisible(k);
+      catDeModulo.set(k.idEscena, k.catalogo);
       caminar(k, {}, ID3, [0, 0, 0], k.idEscena, true, null, k.catalogo);
     } else if (k.objeti === "TQ" || k.objeti === "CL" || k.objeti === "VG") {
       // Tabique, columna o viga del cuarto: caras (`cara0…5`, TQC/CLC) o polígono (VG), en el catálogo 641.
@@ -1204,14 +1643,147 @@ export function interpretarEscena3D(texto: string, opciones: OpcionesInterprete 
       if (k.tile && !out.sueloTile) out.sueloTile = k.tile;
     }
   }
+  // Contornos de encimera (`CPT`) que la encimera reconstruida ya cubre: son la misma mesada dibujada dos veces (la losa del
+  // contorno queda encima, a 900-930 mm, de la reconstruida a 870-900 mm). Se descartan solo si la cubren casi por completo; si
+  // el contorno abarca más (huecos de artefactos, prolongaciones), se conserva como antes.
+  if (cajasRecon.length > 0 && losasContorno.length > 0) {
+    const dentroPoli = (x: number, z: number, poli: [number, number][]) => {
+      let dentro = false;
+      for (let i = 0, j = poli.length - 1; i < poli.length; j = i++) {
+        const [xi, zi] = poli[i];
+        const [xj, zj] = poli[j];
+        if (zi > z !== zj > z && x < ((xj - xi) * (z - zi)) / (zj - zi) + xi) dentro = !dentro;
+      }
+      return dentro;
+    };
+    const dentroCaja = (x: number, z: number, c: CajaEscena) => {
+      const dx = x - c.t[0];
+      const dy = c.s[1] * 0.5 * c.r[4];
+      const dz = z - c.t[2];
+      const lx = c.r[0] * dx + c.r[3] * dy + c.r[6] * dz;
+      const lz = c.r[2] * dx + c.r[5] * dy + c.r[8] * dz;
+      return lx >= -1 && lx <= c.s[0] + 1 && lz >= -1 && lz <= c.s[2] + 1;
+    };
+    const cubiertas = new Set<MallaEscena>();
+    for (const { malla, poli } of losasContorno) {
+      const xs = poli.map((q) => q[0]);
+      const zs = poli.map((q) => q[1]);
+      const x0 = Math.min(...xs);
+      const x1 = Math.max(...xs);
+      const z0 = Math.min(...zs);
+      const z1 = Math.max(...zs);
+      const paso = Math.max(30, Math.sqrt(((x1 - x0) * (z1 - z0)) / 4000));
+      let total = 0;
+      let cubierto = 0;
+      for (let x = x0 + paso / 2; x < x1; x += paso) {
+        for (let z = z0 + paso / 2; z < z1; z += paso) {
+          if (!dentroPoli(x, z, poli)) continue;
+          total++;
+          if (cajasRecon.some((c) => dentroCaja(x, z, c))) cubierto++;
+        }
+      }
+      if (total > 0 && cubierto / total >= 0.9) cubiertas.add(malla);
+    }
+    if (cubiertas.size > 0) out.mallas = out.mallas.filter((m) => !cubiertas.has(m));
+  }
+  // Trozo de encimera reconstruido (almacén `almacenCMB`) que en realidad es el piso de otro módulo apoyado sobre el bajo: la losa de 30 mm
+  // lo tapa y se vería como mesada. Se descarta si el 40 % o más de su volumen cae dentro de cajas (AABB) de OTROS módulos que no son encimera.
+  // Riesgo: una mesada real con un módulo apoyado encima (estante o armario sobre la losa) podría superar el umbral y perderse.
+  if (cajasRecon.length > 0) {
+    const aabb = (c: CajaEscena): [Vec3, Vec3] => {
+      const lo: Vec3 = [Infinity, Infinity, Infinity];
+      const hi: Vec3 = [-Infinity, -Infinity, -Infinity];
+      for (const x of [0, c.s[0]]) {
+        for (const y of [0, c.s[1]]) {
+          for (const z of [0, c.s[2]]) {
+            for (let k = 0; k < 3; k++) {
+              const q = c.t[k] + c.r[k * 3] * x + c.r[k * 3 + 1] * y + c.r[k * 3 + 2] * z;
+              lo[k] = Math.min(lo[k], q);
+              hi[k] = Math.max(hi[k], q);
+            }
+          }
+        }
+      }
+      return [lo, hi];
+    };
+    const mesadas = new Set([...cajasRecon, ...encimasModulo]);
+    const otras = out.cajas.filter((c) => c.mod !== null && !mesadas.has(c) && c.k !== "636" && !cajasHerraje.has(c)).map((c) => ({ mod: c.mod, b: aabb(c) }));
+    const tapadas = new Set<CajaEscena>();
+    for (const c of cajasRecon) {
+      const [lo, hi] = aabb(c);
+      const cand = otras.filter((o) => o.mod !== c.mod && o.b[0].every((x, k) => x < hi[k]) && o.b[1].every((x, k) => x > lo[k]));
+      if (cand.length === 0) continue;
+      const N = 24;
+      let dentro = 0;
+      for (let i = 0; i < N; i++) {
+        for (let j = 0; j < N; j++) {
+          for (let l = 0; l < N; l++) {
+            const p = [lo[0] + ((hi[0] - lo[0]) * (i + 0.5)) / N, lo[1] + ((hi[1] - lo[1]) * (j + 0.5)) / N, lo[2] + ((hi[2] - lo[2]) * (l + 0.5)) / N];
+            if (cand.some((o) => p.every((x, k) => x >= o.b[0][k] && x <= o.b[1][k]))) dentro++;
+          }
+        }
+      }
+      if (dentro / (N * N * N) >= 0.4) tapadas.add(c);
+    }
+    if (tapadas.size > 0) out.cajas = out.cajas.filter((c) => !tapadas.has(c));
+  }
+  // Encimera propia de un mueble que no apoya sobre él: el `encim.` de un mueble va a `H+Hz` sobre el origen del mueble (tapa del
+  // cuerpo); cuando el .3d lo guarda dentro de la carcasa `IZ` (cuyo origen ya está a `Hz` del piso) queda `Hz` (150 mm) más alto,
+  // flotando sobre el mueble (y, si hay un armario alto encima, dentro de su hueco como un estante). TeoWin no lo muestra. Una
+  // encimera apoyada tiene su cara inferior a la altura del tope del cuerpo del mueble; se descarta si queda más de 50 mm sobre él.
+  if (encimasModulo.length > 0) {
+    const tope = new Map<number, number>();
+    const subir = (mod: number | null, r: number[], t: Vec3, pts: Iterable<Vec3>) => {
+      if (mod === null) return;
+      let y = tope.get(mod) ?? -Infinity;
+      for (const [x, yy, z] of pts) y = Math.max(y, t[1] + r[3] * x + r[4] * yy + r[5] * z);
+      tope.set(mod, y);
+    };
+    const esquinas = function* (s: Vec3): Generator<Vec3> {
+      for (const x of [0, s[0]]) for (const y of [0, s[1]]) for (const z of [0, s[2]]) yield [x, y, z];
+    };
+    const conjunto = new Set(encimasModulo);
+    for (const c of out.cajas) if (!conjunto.has(c)) subir(c.mod, c.r, c.t, esquinas(c.s));
+    for (const q of out.mallas) {
+      const pts: Vec3[] = [];
+      for (let k = 0; k + 2 < q.v.length; k += 3) pts.push([q.v[k], q.v[k + 1], q.v[k + 2]]);
+      subir(q.mod, q.r, q.t, pts);
+    }
+    const flotan = new Set<CajaEscena>();
+    for (const c of encimasModulo) {
+      const t = tope.get(c.mod ?? -1);
+      if (t === undefined) continue;
+      let base = Infinity;
+      for (const [x, y, z] of esquinas(c.s)) base = Math.min(base, c.t[1] + c.r[3] * x + c.r[4] * y + c.r[5] * z);
+      if (base > t + 50) flotan.add(c);
+    }
+    if (flotan.size > 0) out.cajas = out.cajas.filter((c) => !flotan.has(c));
+  }
+  // Una animación sin ninguna pieza (la hoja o el cajón se omitieron: invisibles o sin medida) no abre nada: se descarta
+  // para que el visor no ofrezca un botón que no mueve nada.
+  const conPiezas = new Set<number>();
+  for (const c of out.cajas) if (c.a !== undefined && !cajasHerraje.has(c)) conPiezas.add(c.a);
+  for (const q of out.mallas) if (q.a !== undefined) conPiezas.add(q.a);
+  // Las bisagras de una hoja que no se dibuja (todas sus piezas omitidas) tampoco quedan sueltas en el aire.
+  out.cajas = out.cajas.filter((c) => !(cajasHerraje.has(c) && c.a !== undefined && !conPiezas.has(c.a)));
+  if (conPiezas.size < out.animaciones.length) {
+    const nuevo = new Map<number, number>();
+    out.animaciones = out.animaciones.filter((_, i) => {
+      if (!conPiezas.has(i)) return false;
+      nuevo.set(i, nuevo.size);
+      return true;
+    });
+    for (const c of out.cajas) if (c.a !== undefined) c.a = nuevo.get(c.a);
+    for (const q of out.mallas) if (q.a !== undefined) q.a = nuevo.get(q.a);
+  }
   out.suelo = inicioParedes;
   // Los colores de un mueble son de su catálogo; paredes y piso son decoración (catálogo 641).
   const catDe = new Map(out.modulos.map((m) => [m.idEscena, m.catalogo]));
   out.materiales = [
     ...new Set(
       [
-        ...out.cajas.filter((c) => c.m !== "").map((c) => `${c.k ?? catDe.get(c.mod ?? -1) ?? "4"}/${c.m}`),
-        ...out.mallas.filter((q) => q.m !== "").map((q) => `${q.k ?? catDe.get(q.mod ?? -1) ?? "4"}/${q.m}`),
+        ...out.cajas.filter((c) => c.m !== "").map((c) => `${c.k ?? catDe.get(c.mod ?? -1) ?? CAT_DEFECTO}/${c.m}`),
+        ...out.mallas.filter((q) => q.m !== "").map((q) => `${q.k ?? catDe.get(q.mod ?? -1) ?? CAT_DEFECTO}/${q.m}`),
         ...out.paredes.filter((w) => w.m).map((w) => `641/${w.m}`),
         ...(out.materialSuelo ? [`641/${out.materialSuelo}`] : []),
       ],
