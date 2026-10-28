@@ -1,13 +1,20 @@
 import { Prisma } from "@prisma/client";
 import { prisma } from "../../config/prisma";
 import { AppError } from "../../utils/AppError";
-import { AREA_TERMOLAMINADO, fechaISO, parseFecha } from "../planillas/schemas/planilla.schema";
+import { fechaISO, parseFecha } from "../planillas/schemas/planilla.schema";
+import type { ItemInput, ReordenarInput } from "./schemas/planificacion.schema";
 
-// Planificación semanal de Termolaminado cargada por sistema (diseño.md §14.4): pedidos y reclamos que baja la
-// oficina técnica. El estado de producción lo tiene la estación de trabajo: cualquier usuario de la estación (activa)
-// puede marcarlo en cada fila; si está en varias estaciones con estados distintos, puede marcar cualquiera (§17).
+// Planificación semanal POR ESTACIÓN DE TRABAJO (diseño.md §14.4). Cada estación elige una plantilla de planificación
+// (hoy solo TERMOLAMINADO: tabla de pedidos y tabla de reclamos); una estación sin plantilla no tiene planificación.
+// Las filas se arman sobre pedidos ya cargados en la app (`pedido_id`): N° TW = pedido.codigo_pedido, cliente =
+// pedido.referencia, N° de orden = numeroOrdenCustom de la orden del pedido. El estado de producción lo tiene la estación
+// de trabajo: cualquier usuario de una estación (activa) puede marcarlo en cada fila; si está en varias estaciones con
+// estados distintos, puede marcar cualquiera (§17), sea cual sea la estación cuya planificación esté mirando.
 
 const DIA_MS = 86_400_000;
+
+/** Roles que ven la planificación de TODAS las estaciones con plantilla; el resto (fábrica) solo la de las suyas. */
+const ROLES_VEN_TODAS = ["admin", "tecnica", "gerencia"];
 
 /** Lunes de la semana de una fecha (la semana de producción va de lunes a viernes). */
 export function lunesDe(d: Date): Date {
@@ -17,16 +24,14 @@ export function lunesDe(d: Date): Date {
 
 const itemSelect = {
   id: true,
+  estacion_id: true,
   tipo: true,
   semana_inicio: true,
   orden: true,
-  cliente: true,
-  n_tw: true,
-  n_orden: true,
+  pedido_id: true,
+  pedido: { select: { id: true, codigo_pedido: true, referencia: true, orden: { select: { id: true, numeroOrdenCustom: true } } } },
   modelo: true,
   color: true,
-  fabrica: true,
-  fecha_limite: true,
   distribuidor: true,
   ticket: true,
   tipo_reclamo: true,
@@ -54,31 +59,40 @@ type ItemDB = Prisma.PlanificacionItemGetPayload<{ select: typeof itemSelect }>;
 
 const dia = (d: Date | null) => (d ? fechaISO(d) : null);
 
-/** Quién mira la planificación: define qué observaciones puede editar (las suyas) y borrar (las suyas, o cualquiera si gestiona). */
+/** Quién mira la planificación: define qué estaciones ve y qué observaciones puede editar (las suyas) y borrar (las suyas, o cualquiera si gestiona). */
 export interface Lector {
   id: string;
   nombre: string;
+  rol: string;
   puedeGestionar: boolean;
+}
+
+export interface EstacionPlanificacion {
+  id: string;
+  nombre: string;
+  plantilla: "TERMOLAMINADO";
 }
 
 function itemDTO(i: ItemDB, lector: Lector) {
   return {
     id: i.id,
+    estacion_id: i.estacion_id,
     tipo: i.tipo,
     semana_inicio: fechaISO(i.semana_inicio),
-    cliente: i.cliente,
-    n_tw: i.n_tw,
-    n_orden: i.n_orden,
+    pedido_id: i.pedido_id,
+    orden_id: i.pedido?.orden.id ?? null,
+    codigo_pedido: i.pedido?.codigo_pedido ?? null, // N° TW
+    n_orden: i.pedido?.orden.numeroOrdenCustom ?? null,
+    cliente: i.pedido?.referencia ?? null,
     modelo: i.modelo,
     color: i.color,
-    fabrica: dia(i.fabrica),
-    fecha_limite: dia(i.fecha_limite),
+    compromiso: dia(i.compromiso),
+    finalizado_en: dia(i.finalizado_en),
     distribuidor: i.distribuidor,
     ticket: i.ticket,
     tipo_reclamo: i.tipo_reclamo,
-    compromiso: dia(i.compromiso),
-    finalizado_en: dia(i.finalizado_en),
     observaciones: i.observaciones,
+    orden: i.orden,
     marcas: i.marcas.map((m) => ({ estado_id: m.estado_id, estado: m.estado.nombre, color: m.estado.color, marcado_por: m.marcado_por, marcado_en: m.marcado_en.toISOString() })),
     // Observaciones de los usuarios (incluye las borradas, con `eliminado_en`, para que figuren en el historial).
     comentarios: i.comentarios.map((c) => {
@@ -101,9 +115,41 @@ function itemDTO(i: ItemDB, lector: Lector) {
   };
 }
 
+// --- Estaciones ---
+
+/**
+ * Estaciones con planificación que el usuario puede ver: las ACTIVAS con plantilla. Admin, técnica y gerencia ven todas;
+ * el resto (fábrica) solo aquellas de las que es miembro.
+ */
+export async function estacionesVisibles(lector: Lector): Promise<EstacionPlanificacion[]> {
+  const verTodas = ROLES_VEN_TODAS.includes(lector.rol);
+  const estaciones = await prisma.estacionTrabajo.findMany({
+    where: {
+      activa: true,
+      plantilla_planificacion: { not: null },
+      ...(verTodas ? {} : { usuarios: { some: { usuario_id: lector.id } } }),
+    },
+    select: { id: true, nombre: true, plantilla_planificacion: true },
+  });
+  return estaciones
+    .map((e) => ({ id: e.id, nombre: e.nombre, plantilla: e.plantilla_planificacion! }))
+    .sort((a, b) => a.nombre.localeCompare(b.nombre, "es") || a.id.localeCompare(b.id));
+}
+
+/** La estación de trabajo existe, está activa y tiene plantilla de planificación (para cargar, editar y reordenar filas). */
+async function exigirEstacionConPlantilla(id: string) {
+  const e = await prisma.estacionTrabajo.findUnique({ where: { id }, select: { id: true, activa: true, plantilla_planificacion: true } });
+  if (!e || !e.activa || !e.plantilla_planificacion) {
+    throw new AppError("estacion_id: la estación no existe, está inactiva o no tiene plantilla de planificación.", 400);
+  }
+}
+
+// --- Lectura de una semana ---
+
 /**
  * Estados de producción que el usuario puede marcar: los de sus estaciones de trabajo activas (diseño.md §17), sin
  * repetir, en el orden del catálogo. Vacío si ninguna de sus estaciones tiene estado (o si no tiene estaciones).
+ * No depende de qué estación de planificación esté mirando.
  */
 export async function estadosDeUsuario(usuarioId: string) {
   return prisma.estadoProduccion.findMany({
@@ -113,17 +159,32 @@ export async function estadosDeUsuario(usuarioId: string) {
   });
 }
 
-export async function getSemana(semanaRaw: string | undefined, lector: Lector) {
+/** La estación pedida (si el usuario la ve) o, sin `estacionId`, la primera que ve. */
+async function resolverEstacion(estacionId: string | undefined, lector: Lector): Promise<EstacionPlanificacion> {
+  const visibles = await estacionesVisibles(lector);
+  if (!estacionId) {
+    if (visibles.length === 0) throw new AppError("No hay planificación disponible para tus estaciones de trabajo.", 404);
+    return visibles[0];
+  }
+  const e = visibles.find((v) => v.id === estacionId);
+  if (e) return e;
+  const existe = await prisma.estacionTrabajo.findFirst({ where: { id: estacionId, plantilla_planificacion: { not: null } }, select: { id: true } });
+  if (!existe) throw new AppError("Estación de trabajo no encontrada o sin planificación.", 404);
+  throw new AppError("No tenés acceso a la planificación de esa estación.", 403);
+}
+
+export async function getSemana(estacionId: string | undefined, semanaRaw: string | undefined, lector: Lector) {
+  const estacion = await resolverEstacion(estacionId, lector);
   const hoy = parseFecha(fechaISO(new Date()));
   const semana = lunesDe(semanaRaw ? parseFecha(semanaRaw, "La semana") : hoy);
   const [items, semanas, estados, misEstados] = await Promise.all([
     prisma.planificacionItem.findMany({
-      where: { area: AREA_TERMOLAMINADO, semana_inicio: semana, eliminado_en: null },
+      where: { estacion_id: estacion.id, semana_inicio: semana, eliminado_en: null },
       select: itemSelect,
       orderBy: [{ orden: "asc" }, { creado_en: "asc" }],
     }),
     prisma.planificacionItem.findMany({
-      where: { area: AREA_TERMOLAMINADO, eliminado_en: null },
+      where: { estacion_id: estacion.id, eliminado_en: null },
       select: { semana_inicio: true },
       distinct: ["semana_inicio"],
       orderBy: { semana_inicio: "desc" },
@@ -133,6 +194,7 @@ export async function getSemana(semanaRaw: string | undefined, lector: Lector) {
     estadosDeUsuario(lector.id),
   ]);
   return {
+    estacion,
     semana_inicio: fechaISO(semana),
     semanas: semanas.map((s) => fechaISO(s.semana_inicio)),
     estados,
@@ -143,37 +205,57 @@ export async function getSemana(semanaRaw: string | undefined, lector: Lector) {
   };
 }
 
-export interface ItemInput {
-  tipo: "PEDIDOS" | "RECLAMOS";
-  semana: string;
-  cliente: string;
-  n_tw: string;
-  n_orden: string | null;
-  modelo: string | null;
-  color: string | null;
-  fabrica: string | null;
-  fecha_limite: string | null;
-  distribuidor: string | null;
-  ticket: string | null;
-  tipo_reclamo: string | null;
-  compromiso: string | null;
-  finalizado_en: string | null;
-  observaciones: string | null;
+// --- Búsquedas ---
+
+/** Pedidos cargados en la app para armar una fila: búsqueda por N° de pedido (contiene, sin distinguir mayúsculas). */
+export async function buscarPedidos(q: string, limit: number) {
+  const pedidos = await prisma.pedido.findMany({
+    where: {
+      estado: { not: "ELIMINADO" },
+      orden: { estado: { not: "ELIMINADO" } },
+      ...(q ? { codigo_pedido: { contains: q, mode: "insensitive" } } : {}),
+    },
+    orderBy: q ? [{ codigo_pedido: "asc" }] : [{ creado_en: "desc" }, { codigo_pedido: "asc" }],
+    take: limit,
+    select: { id: true, codigo_pedido: true, referencia: true, orden: { select: { id: true, numeroOrdenCustom: true } } },
+  });
+  return pedidos.map((p) => ({ pedido_id: p.id, codigo_pedido: p.codigo_pedido, referencia: p.referencia, orden_id: p.orden.id, n_orden: p.orden.numeroOrdenCustom }));
 }
+
+/** Dónde está un pedido dentro de la planificación de una estación: las filas vigentes cuyo pedido contiene `q`. */
+export async function buscarEnEstacion(estacionId: string, q: string, lector: Lector) {
+  const estacion = await resolverEstacion(estacionId, lector);
+  if (q === "") return [];
+  const items = await prisma.planificacionItem.findMany({
+    where: { estacion_id: estacion.id, eliminado_en: null, pedido: { codigo_pedido: { contains: q, mode: "insensitive" } } },
+    orderBy: [{ semana_inicio: "desc" }, { tipo: "asc" }, { orden: "asc" }],
+    take: 50,
+    select: { id: true, semana_inicio: true, tipo: true, pedido: { select: { codigo_pedido: true, referencia: true } } },
+  });
+  return items.map((i) => ({ item_id: i.id, semana_inicio: fechaISO(i.semana_inicio), tipo: i.tipo, codigo_pedido: i.pedido!.codigo_pedido, cliente: i.pedido!.referencia }));
+}
+
+// --- Alta, edición, baja y orden de las filas ---
 
 const fecha = (v: string | null, etiqueta: string) => (v ? parseFecha(v, etiqueta) : null);
 
+/** El pedido tiene que existir y, al cargarlo o cambiarlo, no estar eliminado (ni su orden). `actual` = el que ya tenía la fila. */
+async function exigirPedido(pedidoId: string, actual?: string | null) {
+  const p = await prisma.pedido.findUnique({ where: { id: pedidoId }, select: { estado: true, orden: { select: { estado: true } } } });
+  if (!p) throw new AppError("pedido_id: el pedido no existe.", 400);
+  if (pedidoId !== actual && (p.estado === "ELIMINADO" || p.orden.estado === "ELIMINADO")) {
+    throw new AppError("pedido_id: el pedido fue eliminado.", 400);
+  }
+}
+
 function datosDe(i: ItemInput) {
   return {
+    estacion_id: i.estacion_id,
+    pedido_id: i.pedido_id,
     tipo: i.tipo,
     semana_inicio: lunesDe(parseFecha(i.semana, "La semana")),
-    cliente: i.cliente,
-    n_tw: i.n_tw,
-    n_orden: i.n_orden,
     modelo: i.modelo,
     color: i.color,
-    fabrica: fecha(i.fabrica, "La fecha de fábrica"),
-    fecha_limite: fecha(i.fecha_limite, "La fecha límite"),
     distribuidor: i.distribuidor,
     ticket: i.ticket,
     tipo_reclamo: i.tipo_reclamo,
@@ -188,25 +270,30 @@ async function itemVigente(id: string) {
   if (!i || i.eliminado_en) throw new AppError("Fila no encontrada.", 404);
 }
 
+/** Lugar al final de la lista (estación, semana, tipo). */
+async function proximoOrden(estacionId: string, semana: Date, tipo: "PEDIDOS" | "RECLAMOS") {
+  const ultimo = await prisma.planificacionItem.aggregate({ where: { estacion_id: estacionId, semana_inicio: semana, tipo, eliminado_en: null }, _max: { orden: true } });
+  return (ultimo._max.orden ?? -1) + 1;
+}
+
 export async function crearItem(input: ItemInput, lector: Lector) {
+  await exigirEstacionConPlantilla(input.estacion_id);
+  await exigirPedido(input.pedido_id);
   const datos = datosDe(input);
-  const ultimo = await prisma.planificacionItem.aggregate({
-    where: { area: AREA_TERMOLAMINADO, semana_inicio: datos.semana_inicio, tipo: datos.tipo, eliminado_en: null },
-    _max: { orden: true },
-  });
-  const creada = await prisma.planificacionItem.create({ data: { ...datos, orden: (ultimo._max.orden ?? -1) + 1 }, select: itemSelect });
+  const orden = await proximoOrden(datos.estacion_id, datos.semana_inicio, datos.tipo);
+  const creada = await prisma.planificacionItem.create({ data: { ...datos, orden }, select: itemSelect });
   return itemDTO(creada, lector);
 }
 
 export async function actualizarItem(id: string, input: ItemInput, lector: Lector) {
-  await itemVigente(id);
+  const actual = await prisma.planificacionItem.findUnique({ where: { id }, select: { eliminado_en: true, estacion_id: true, tipo: true, semana_inicio: true, pedido_id: true } });
+  if (!actual || actual.eliminado_en) throw new AppError("Fila no encontrada.", 404);
+  await exigirEstacionConPlantilla(input.estacion_id);
+  await exigirPedido(input.pedido_id, actual.pedido_id);
   const datos = datosDe(input);
-  const actual = await prisma.planificacionItem.findUnique({ where: { id }, select: { tipo: true, semana_inicio: true } });
-  // Cambiar de semana o de tipo manda la fila al final de la nueva lista.
-  const cambio = actual!.tipo !== datos.tipo || actual!.semana_inicio.getTime() !== datos.semana_inicio.getTime();
-  const orden = cambio
-    ? ((await prisma.planificacionItem.aggregate({ where: { area: AREA_TERMOLAMINADO, semana_inicio: datos.semana_inicio, tipo: datos.tipo, eliminado_en: null }, _max: { orden: true } }))._max.orden ?? -1) + 1
-    : undefined;
+  // Cambiar de estación, de semana o de tipo manda la fila al final de la nueva lista.
+  const cambio = actual.estacion_id !== datos.estacion_id || actual.tipo !== datos.tipo || actual.semana_inicio.getTime() !== datos.semana_inicio.getTime();
+  const orden = cambio ? await proximoOrden(datos.estacion_id, datos.semana_inicio, datos.tipo) : undefined;
   const u = await prisma.planificacionItem.update({ where: { id }, data: { ...datos, ...(orden === undefined ? {} : { orden }) }, select: itemSelect });
   return itemDTO(u, lector);
 }
@@ -214,6 +301,31 @@ export async function actualizarItem(id: string, input: ItemInput, lector: Lecto
 export async function eliminarItem(id: string) {
   await itemVigente(id);
   await prisma.planificacionItem.update({ where: { id }, data: { eliminado_en: new Date() } });
+}
+
+/**
+ * Reordena las filas de una estación + semana + tipo: `ids` tiene que ser EXACTAMENTE el conjunto de filas vigentes de esa
+ * lista (en el orden nuevo). Reasigna `orden` 0..n-1 en una transacción, con las filas bloqueadas.
+ */
+export async function reordenarItems(input: ReordenarInput) {
+  await exigirEstacionConPlantilla(input.estacion_id);
+  const semana = lunesDe(parseFecha(input.semana, "La semana"));
+  await prisma.$transaction(async (tx) => {
+    const vigentes = await tx.$queryRaw<{ id: string }[]>`
+      SELECT "id"::text AS "id" FROM "planificacion_item"
+      WHERE "estacion_id" = ${input.estacion_id}::uuid AND "semana_inicio" = ${fechaISO(semana)}::date AND "tipo" = ${input.tipo}::"PlanificacionTipo" AND "eliminado_en" IS NULL
+      FOR UPDATE`;
+    const set = new Set(vigentes.map((v) => v.id.toLowerCase()));
+    const mismas = input.ids.length === set.size && input.ids.every((id) => set.has(id.toLowerCase()));
+    if (!mismas) {
+      throw new AppError("ids: la lista no coincide con las filas vigentes de esa estación, semana y tipo (puede que alguien haya agregado o quitado filas): recargá la planificación.", 400);
+    }
+    if (input.ids.length === 0) return;
+    await tx.$executeRaw`
+      UPDATE "planificacion_item" SET "orden" = v."pos"
+      FROM unnest(${input.ids}::uuid[], ${input.ids.map((_, i) => i)}::int[]) AS v("id", "pos")
+      WHERE "planificacion_item"."id" = v."id"`;
+  });
 }
 
 /**

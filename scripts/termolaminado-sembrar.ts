@@ -12,7 +12,7 @@ import { prisma } from "../src/config/prisma";
 
 const DESDE = "2026-10-05";
 const HASTA = "2026-10-16";
-const AREA = "TERMOLAMINADO";
+const AREA = "TERMOLAMINADO"; // área de las planillas de producción (planilla_produccion.area)
 const ESTACION_TRABAJO = "termolaminado1";
 const USUARIO = "termolaminado1"; // autor que queda en creado_por / modificado_por de lo sembrado
 
@@ -73,78 +73,71 @@ const hhmm = (min: number) => `${String(Math.floor(min / 60)).padStart(2, "0")}:
 
 const d = (iso: string) => new Date(`${iso}T00:00:00Z`);
 
-// Planificación de ejemplo, copiada de las planillas de la oficina técnica (semanas 39 a 41 y reclamos).
-async function sembrarPlanificacion(listoTermoId: string) {
-  type P = [cliente: string, nTw: string, modelo: string, color: string, fabrica: string, limite: string];
-  const semanas: { semana: string; filas: P[] }[] = [
-    {
-      semana: "2026-09-21",
-      filas: [
-        ["Perchante Luciano - MARMOLES LOPEZ", "JN2-00118", "LONDON", "BLANCO MATE", "2026-09-25", "2026-09-07"],
-        ["Valentini Daniela - ACCESANIGA", "RO-01315", "LONDON", "MACADAMIA", "2026-09-25", "2026-09-07"],
-        ["Valentini Daniela - ACCESANIGA", "RO-01228", "LONDON", "MACADAMIA", "2026-09-25", "2026-09-07"],
-        ["Valentini Daniela - ACCESANIGA", "RO-01226", "LONDON", "MACADAMIA", "2026-09-25", "2026-09-07"],
-        ["Garcia Ariana - DI-SEGNO DI NOI", "S1-01017_001", "LONDON + PURA", "BLANCO MATE", "2026-09-25", "2026-09-07"],
-        ["Borrego Susana - PAPPALARDO DORELLA", "VGS-00116_001", "LONDON", "MACADAMIA", "2026-09-25", "2026-09-07"],
-      ],
-    },
-    {
-      semana: "2026-09-28",
-      filas: [
-        ["Sobrero Victoria - ALCOBER EMMANUEL", "VLA3-00205_001", "HERENCIA", "BLANCO MATE", "2026-10-02", "2026-10-14"],
-        ["Ellemberger Nicolas - NEOSTONE CRESPO", "CR-03990_004", "URBAN TERM", "MACADAMIA", "2026-10-02", "2026-10-14"],
-        ["Jurado Gabriel - AMOBLASUR SAS", "TR-01316_001", "URBAN TERM", "MACADAMIA", "2026-10-02", "2026-10-21"],
-      ],
-    },
-    {
-      semana: "2026-10-05",
-      filas: [
-        ["Prada Graciela - NEOSTONE CRESPO", "CR-03913", "LONDON", "GRIS GRAFITO", "2026-10-09", "2026-10-21"],
-        ["Orzuza Valeria - NEOSTONE CRESPO", "CR-03821_003", "HERENCIA", "NEGRO MATE", "2026-10-09", "2026-10-21"],
-        ["Sochor Estela - SVP GROUP SRL", "MDQ-00630_001", "URBAN TERM", "BLANCO BRILLANTE", "2026-10-09", "2026-10-21"],
-        ["Tocallini Francisco - MARMOLES TURCO SRL", "PE-00182_001", "URBAN TERM", "BLANCO MATE", "2026-10-09", "2026-10-21"],
-      ],
-    },
-  ];
-  const terminados = new Set(["JN2-00118", "RO-01315", "RO-01228", "RO-01226", "VGS-00116_001", "TR-01316_001"]);
-  const semanasSembradas = [...semanas.map((s) => s.semana), "2026-10-12"].map(d);
-  await prisma.planificacionItem.deleteMany({ where: { area: AREA, semana_inicio: { in: semanasSembradas } } });
+// Planificación de ejemplo de la estación (plantilla TERMOLAMINADO). Las filas se arman sobre pedidos reales de la base
+// (hay que tener órdenes cargadas): los primeros van a PEDIDOS de las semanas 21/09, 28/09 y 05/10 y los últimos a RECLAMOS
+// de la semana del 12/10. Modelo, color, compromiso y observaciones son de ejemplo.
+async function sembrarPlanificacion(listoTermoId: string, estacionId: string) {
+  const reales = await prisma.pedido.findMany({
+    where: { estado: { not: "ELIMINADO" }, orden: { estado: { not: "ELIMINADO" } } },
+    select: { id: true, codigo_pedido: true },
+    orderBy: { codigo_pedido: "asc" },
+    take: 24,
+  });
+  const semanas = ["2026-09-21", "2026-09-28", "2026-10-05"];
+  const modelos = ["LONDON", "HERENCIA", "URBAN TERM", "LONDON + PURA"];
+  const nPedidos = Math.min(12, Math.max(0, reales.length - 6));
+  const pedidos = reales.slice(0, nPedidos);
+  const reclamos = reales.slice(nPedidos, nPedidos + 6);
+  const semanasSembradas = [...semanas, "2026-10-12"].map(d);
+  await prisma.planificacionItem.deleteMany({ where: { estacion_id: estacionId, semana_inicio: { in: semanasSembradas } } });
 
   let items = 0;
-  for (const { semana, filas } of semanas) {
-    for (const [orden, [cliente, n_tw, modelo, color, fabrica, limite]] of filas.entries()) {
-      const item = await prisma.planificacionItem.create({
-        data: { area: AREA, tipo: "PEDIDOS", semana_inicio: d(semana), orden, cliente, n_tw, modelo, color, fabrica: d(fabrica), fecha_limite: d(limite) },
-      });
-      items++;
-      if (terminados.has(n_tw)) {
-        await prisma.planificacionMarca.create({ data: { item_id: item.id, estado_id: listoTermoId, marcado_por: USUARIO, marcado_en: new Date(`${fabrica}T18:00:00Z`) } });
-      }
+  const ordenPorLista = new Map<string, number>();
+  const siguiente = (clave: string) => {
+    const n = ordenPorLista.get(clave) ?? 0;
+    ordenPorLista.set(clave, n + 1);
+    return n;
+  };
+  for (const [i, p] of pedidos.entries()) {
+    const semana = semanas[i % semanas.length];
+    const item = await prisma.planificacionItem.create({
+      data: {
+        estacion_id: estacionId,
+        pedido_id: p.id,
+        tipo: "PEDIDOS",
+        semana_inicio: d(semana),
+        orden: siguiente(`P${semana}`),
+        modelo: elegir(modelos),
+        color: elegir(COLORES),
+        compromiso: new Date(d(semana).getTime() + 11 * 86_400_000),
+      },
+    });
+    items++;
+    if (i % 3 === 0) {
+      await prisma.planificacionMarca.create({ data: { item_id: item.id, estado_id: listoTermoId, marcado_por: USUARIO, marcado_en: new Date(`${semana}T18:00:00Z`) } });
     }
   }
-
-  type R = [cliente: string, distribuidor: string, ticket: string, nTw: string, tipo: string, color: string, compromiso: string, finalizado: string | null, obs: string | null];
-  const reclamos: R[] = [
-    ["EDIFICIO VICTORIA", "LOCAL", "HT01405", "", "Relaminado / 182 placas", "GRIS GRAFITO", "2026-10-23", null, "Falta carpeta roja"],
-    ["DITTLER ANA CLARA", "LOCAL", "HT01223", "", "Relaminado / 6 placas", "BLANCO MATE", "2026-10-12", null, null],
-    ["LEONARDON GONZALO", "LOCAL", "HT01336", "", "Relaminado / 11 placas", "BLANCO MATE", "2026-10-12", null, null],
-    ["DITTLER ANA CLARA", "LOCAL", "HT01369", "", "Modificación y relaminado / 1", "BLANCO MATE", "2026-10-12", null, null],
-    ["PUSINERI JUAN MANUEL", "LOCAL", "HT01381", "", "Relaminado / 4 puertas", "BLANCO MATE", "2026-10-12", null, null],
-    ["SHOWROOM ALCOBER", "ALCOBER", "HT01315", "26-02668", "Carpintería y relaminado", "BLANCO MATE", "2026-10-12", "2026-10-01", null],
-    ["ARGILES PABLO", "ALCOBER", "HT01400", "26-02688", "Carpintería y relaminado", "BLANCO MATE", "2026-10-12", "2026-10-01", null],
-    ["SCHUNK MIGUEL", "LOCAL", "HT01416", "", "Relaminado / 43 placas", "GRIS GRAFITO/MADERA", "2026-10-16", null, "No está aún"],
-    ["DEGRACIA JOSEFINA", "LOCAL", "HT01404", "", "Relaminado / 23 placas", "BLANCO BRILLANTE", "2026-10-16", null, null],
-    ["ALONSO JUAN CARLOS", "LOCAL", "HT01414", "", "Relaminado / 23 placas", "BLANCO BRILLANTE", "2026-10-16", null, null],
-    ["VIVAS MARIO", "LOCAL", "HT01415", "", "Relaminado / 9 placas", "BLANCO BRILLANTE", "2026-10-16", null, null],
-    ["BENTANCOR REGINA", "LOCAL", "HT01417", "", "Relaminado / 10 placas", "BLANCO BRILLANTE", "2026-10-16", null, null],
-  ];
-  for (const [orden, [cliente, distribuidor, ticket, n_tw, tipo_reclamo, color, compromiso, finalizado, observaciones]] of reclamos.entries()) {
+  const tiposReclamo = ["Relaminado / 6 placas", "Carpintería y relaminado", "Modificación y relaminado / 1", "Relaminado / 23 placas"];
+  for (const [i, p] of reclamos.entries()) {
     await prisma.planificacionItem.create({
-      data: { area: AREA, tipo: "RECLAMOS", semana_inicio: d("2026-10-12"), orden, cliente, distribuidor, ticket, n_tw, tipo_reclamo, color, compromiso: d(compromiso), finalizado_en: finalizado ? d(finalizado) : null, observaciones },
+      data: {
+        estacion_id: estacionId,
+        pedido_id: p.id,
+        tipo: "RECLAMOS",
+        semana_inicio: d("2026-10-12"),
+        orden: siguiente("R2026-10-12"),
+        distribuidor: i % 2 === 0 ? "LOCAL" : "ALCOBER",
+        ticket: `HT0${1300 + i}`,
+        tipo_reclamo: tiposReclamo[i % tiposReclamo.length],
+        color: elegir(COLORES),
+        compromiso: d("2026-10-16"),
+        finalizado_en: i === 1 ? d("2026-10-01") : null,
+        observaciones: i === 0 ? "Falta carpeta roja" : null,
+      },
     });
     items++;
   }
-  console.log(`Planificación sembrada: ${items} filas (semanas 21/09, 28/09, 05/10 y reclamos del 12/10).`);
+  console.log(`Planificación sembrada: ${items} filas sobre pedidos reales (${pedidos.length} de pedidos y ${reclamos.length} de reclamos).`);
 }
 
 async function main() {
@@ -164,6 +157,8 @@ async function main() {
   if (!estacionTrabajo) {
     estacionTrabajo = await prisma.estacionTrabajo.create({ data: { nombre: ESTACION_TRABAJO, estado_id: listoTermo.id } });
   }
+  // La estación sembrada tiene planificación (plantilla TERMOLAMINADO).
+  await prisma.estacionTrabajo.update({ where: { id: estacionTrabajo.id }, data: { plantilla_planificacion: "TERMOLAMINADO" } });
   for (const planilla of ["LIJADO", "ENCOLADO", "PVC"] as PlanillaEstacion[]) {
     await prisma.estacionTrabajoPlanilla.upsert({
       where: { estacion_trabajo_id_planilla: { estacion_trabajo_id: estacionTrabajo.id, planilla } },
@@ -329,7 +324,7 @@ async function main() {
     console.log("Planilla corregida de ejemplo:", corregida.estacion, corregida.fecha.toISOString().slice(0, 10));
   }
 
-  await sembrarPlanificacion(listoTermo.id);
+  await sembrarPlanificacion(listoTermo.id, estacionTrabajo.id);
 
   console.log(`Sembrado: ${planillas} planillas, ${registros} registros, ${fotos} fotos (${DESDE} a ${HASTA}). Estación de trabajo: ${ESTACION_TRABAJO}.`);
 }
