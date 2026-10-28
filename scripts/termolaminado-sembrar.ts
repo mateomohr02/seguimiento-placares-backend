@@ -4,6 +4,7 @@
 // Reemplaza todas las planillas (y sus fotos y versiones) de 2026-10-05 al 2026-10-16. Si la lista de
 // estación de trabajo termolaminado1 no existe la crea; la deja con su estado
 // "Listo Termolaminado" y las tres planillas (operarios históricos Fabián y Carlos), y siembra la planificación (pedidos y reclamos) de ejemplo.
+// En PVC cada fila es una TANDA de mesas (diseño.md §14.12): 1 a 3 pedidos del día, tamaño y cantidad de mesas.
 // Las fotos de PVC son imágenes de relleno.
 import { Prisma, type PlanillaEstacion } from "@prisma/client";
 import { deflateSync, crc32 } from "node:zlib";
@@ -252,8 +253,19 @@ async function main() {
       planillas++;
 
       let reloj = estacion === "PVC" ? 7 * 60 + 40 : 6 * 60 + 10;
-      for (const [orden, f] of delDia.entries()) {
-        const p = f.pedido;
+      // Lijado y Encolado: un pedido por fila. PVC: tandas de 1 a 3 pedidos (el primero pone el color).
+      const grupos: Pedido[][] = [];
+      if (estacion === "PVC") {
+        for (let i = 0; i < delDia.length; ) {
+          const n = Math.min(delDia.length - i, entre(1, 3));
+          grupos.push(delDia.slice(i, i + n).map((x) => x.pedido));
+          i += n;
+        }
+      } else {
+        for (const x of delDia) grupos.push([x.pedido]);
+      }
+      for (const [orden, grupo] of grupos.entries()) {
+        const p = grupo[0];
         const dur = entre(25, 110);
         const inicio = reloj;
         const fin = borrador && orden === delDia.length - 1 ? null : reloj + dur;
@@ -261,22 +273,25 @@ async function main() {
 
         // Diferencia de piezas de ejemplo: un pedido pierde una pieza en Encolado.
         const piezas = estacion === "ENCOLADO" && p.nota?.includes("dañada") ? p.piezas - 1 : p.piezas;
-        const grandes = estacion === "PVC" ? Math.floor(piezas * rnd() * 0.6) : null;
         const fila = await prisma.planillaFila.create({
           data: {
             planilla_id: creada.id,
             orden,
             hora_inicio: hhmm(inicio),
             hora_fin: fin === null ? null : hhmm(fin),
-            pedido_codigo: p.codigo,
-            pedido_id: idPorCodigo.get(p.codigo) ?? null,
-            cantidad_piezas: piezas,
+            pedido_codigo: estacion === "PVC" ? "" : p.codigo,
+            pedido_id: estacion === "PVC" ? null : (idPorCodigo.get(p.codigo) ?? null),
+            cantidad_piezas: estacion === "PVC" ? grupo.reduce((t, x) => t + x.piezas, 0) : piezas,
             observaciones: p.nota && estacion !== "LIJADO" ? p.nota : elegir(OBSERVACIONES) || null,
             colocacion_pvc: estacion === "PVC" ? elegir(COLOCACION) : null,
             perfilado: estacion === "PVC" ? elegir(PERFILADO) || null : null,
             colores: estacion === "PVC" ? p.color : null,
-            mesa_chica: estacion === "PVC" ? piezas - (grandes ?? 0) : null,
-            mesa_grande: estacion === "PVC" ? grandes : null,
+            mesa_tamano: estacion === "PVC" ? elegir(["CHICA", "GRANDE"] as const) : null,
+            mesa_cantidad: estacion === "PVC" ? entre(1, 4) : null,
+            pedidos:
+              estacion === "PVC"
+                ? { create: grupo.map((x, j) => ({ orden: j, pedido_codigo: x.codigo, pedido_id: idPorCodigo.get(x.codigo) ?? null, cantidad_piezas: x.piezas })) }
+                : undefined,
           },
         });
         registros++;

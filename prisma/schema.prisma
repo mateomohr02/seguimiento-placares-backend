@@ -491,9 +491,19 @@ model PlanillaOperario {
   @@map("planilla_operario")
 }
 
-// Una fila = un pedido trabajado. `pedido_codigo` es el texto cargado (mayúsculas);
+// Tamaño de las mesas de una tanda de PVC (diseño.md §14.12).
+enum MesaTamano {
+  CHICA
+  GRANDE
+
+  @@map("mesa_tamano")
+}
+
+// Una fila = un pedido trabajado (Lijado y Encolado). En PVC una fila es una TANDA DE MESAS (diseño.md §14.12):
+// tamaño + cantidad de mesas, y sus pedidos en `pedidos`; `pedido_codigo` = '' y `pedido_id` = null. `pedido_codigo` es el texto cargado (mayúsculas);
 // `pedido_id` solo se completa si coincide exactamente con un pedido sincronizado.
-// En PVC `cantidad_piezas` = mesa_chica + mesa_grande (lo calcula el backend).
+// En PVC `cantidad_piezas` = suma de las piezas de sus pedidos (lo calcula el backend).
+// `mesa_chica` / `mesa_grande` quedaron sin uso (se conservan en la tabla; la API ya no los expone).
 model PlanillaFila {
   id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   planilla_id     String   @db.Uuid
@@ -509,15 +519,35 @@ model PlanillaFila {
   colores         String?
   mesa_chica      Int?
   mesa_grande     Int?
+  mesa_tamano     MesaTamano?
+  mesa_cantidad   Int?
   /// Borrado lógico: un ítem quitado de la planilla se conserva (con sus fotos) para el historial.
   eliminado_en    DateTime?
 
   planilla PlanillaProduccion @relation(fields: [planilla_id], references: [id], onDelete: Cascade)
   fotos    PlanillaFoto[]
+  pedidos  PlanillaFilaPedido[]
 
   @@index([planilla_id])
   @@index([pedido_codigo])
   @@map("planilla_fila")
+}
+
+// Pedido de una tanda de PVC con las piezas de ese pedido que entraron en la tanda. `pedido_id` solo se completa si el
+// código coincide exactamente con un pedido sincronizado (sin FK, igual que planilla_fila.pedido_id).
+model PlanillaFilaPedido {
+  id              String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  fila_id         String  @db.Uuid
+  orden           Int
+  pedido_codigo   String
+  pedido_id       String? @db.Uuid
+  cantidad_piezas Int
+
+  fila PlanillaFila @relation(fields: [fila_id], references: [id], onDelete: Cascade)
+
+  @@index([fila_id])
+  @@index([pedido_codigo])
+  @@map("planilla_fila_pedido")
 }
 
 // Foto de la pieza antes de termolaminar (filas de PVC). Archivo en bytea, borrado lógico.
