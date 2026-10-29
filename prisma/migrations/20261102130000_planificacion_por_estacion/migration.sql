@@ -1,36 +1,40 @@
--- Planificación por estación de trabajo.
---  1. Cada estación elige una "plantilla de planificación" (hoy solo TERMOLAMINADO); sin plantilla no tiene planificación.
---  2. La planificación se arma sobre pedidos ya cargados: planificacion_item pasa a tener estacion_id y pedido_id.
---     N° TW, cliente y N° de orden ya no se guardan en la fila: salen del pedido (codigo_pedido, referencia) y de su orden.
+-- Planificaciones independientes de las estaciones.
+--  1. Existe un catálogo de planificaciones (enum PlantillaPlanificacion: TERMOLAMINADO y CALIDAD). Las filas de planificacion_item
+--     pertenecen a UNA planificación (columna `plantilla`), no a una estación. La estación tiene `plantilla_planificacion`
+--     (nullable) = la planificación que se le ASIGNA: varias estaciones pueden tener la misma; sin asignar no ve ninguna.
+--  2. planificacion_item pasa a tener `plantilla` y pedido_id (opcional). El cliente es TEXTO LIBRE (se conserva `cliente`);
+--     `n_tw` (texto) es el N° de pedido tal cual y, si coincide exacto con un pedido vigente, la fila queda asociada (pedido_id);
+--     `n_orden` (texto) solo se usa en filas SIN pedido (en las asociadas el N° de orden sale de la orden del pedido).
 --  3. Pedidos: "Fecha compromiso" reemplaza a "Fábrica" y "Fecha límite".
---  4. orden.posicion: lugar de cada orden en la cartera (la reordena técnica a mano).
+--  4. Se eliminan los RECLAMOS de todos lados (filas, tipo, distribuidor, ticket, tipo_reclamo, finalizado_en y el enum
+--     PlanificacionTipo). Calidad se planifica por día (lunes a sábado): columnas `dia` y `modulos`.
+--  5. orden.posicion: lugar de cada orden en la cartera (la reordena técnica a mano).
 --
--- MIGRA LA PLANIFICACIÓN VIEJA y elimina las columnas viejas (area, cliente, n_tw, n_orden, fabrica, fecha_limite):
---  * Se crea la estación "Termolaminado" con la plantilla TERMOLAMINADO (si ya hay una estación con ese nombre, sin distinguir
---    mayúsculas, se le asigna la plantilla). No se asignan usuarios: los de fábrica la ven recién cuando técnica los agrega.
---  * Las filas vigentes que tienen pedido (n_tw igual a pedido.codigo_pedido, pedido y orden no eliminados) pasan a esa
---    estación con su pedido_id. Si hay más de un pedido con ese código, se toma el más reciente.
---  * Las filas vigentes SIN pedido se borran (borrado lógico, eliminado_en): decisión del usuario, "solo migro las que
---    tienen pedido". Quedan en la tabla, pero ya sin los datos viejos (cliente, n_tw...) que se eliminan.
+-- MIGRA LA PLANIFICACIÓN VIEJA:
+--  * NO se crea ni se toca ninguna estación: las que ya existan quedan como están (sin planificación asignada); el usuario les
+--    asigna la planificación desde la configuración de estaciones. Nada en la planificación depende del nombre de una estación.
+--  * TODAS las filas PEDIDOS pasan a la planificación TERMOLAMINADO (Calidad no existía) y conservan cliente / n_tw / n_orden. Las vigentes cuyo n_tw es igual a
+--    pedido.codigo_pedido (coincidencia exacta; pedido y orden no eliminados; si hay más de uno, el más reciente) quedan
+--    asociadas (pedido_id); las demás quedan SIN pedido (se ven con el aviso «pedido no encontrado»). Las ya borradas
+--    lógicamente (eliminado_en) se mantienen como están.
+--  * Las filas RECLAMOS se BORRAN físicamente (con sus marcas y observaciones, en cascada). Decisión del usuario.
 --  * En PEDIDOS, compromiso toma el valor de fecha_limite cuando compromiso estaba vacío. "fabrica" se pierde.
 -- Revertir: down.sql (restaura lo que se pueda; lo que se perdió está listado ahí).
 
--- 1. Plantilla de planificación de la estación.
-CREATE TYPE "PlantillaPlanificacion" AS ENUM ('TERMOLAMINADO');
+-- 1. Catálogo de planificaciones y planificación asignada a cada estación (null = ninguna; no se asigna a ninguna estación acá).
+CREATE TYPE "PlantillaPlanificacion" AS ENUM ('TERMOLAMINADO', 'CALIDAD');
 ALTER TABLE "estacion_trabajo" ADD COLUMN "plantilla_planificacion" "PlantillaPlanificacion";
 
--- Estación "Termolaminado" (la crea si no existe una con ese nombre, sin distinguir mayúsculas).
-INSERT INTO "estacion_trabajo" ("nombre", "activa")
-SELECT 'Termolaminado', true
-WHERE NOT EXISTS (SELECT 1 FROM "estacion_trabajo" WHERE lower("nombre") = 'termolaminado');
+-- 2. Reclamos: se borran del todo (las marcas, observaciones y su historial se van en cascada).
+DELETE FROM "planificacion_item" WHERE "tipo" = 'RECLAMOS';
 
-UPDATE "estacion_trabajo" SET "plantilla_planificacion" = 'TERMOLAMINADO' WHERE lower("nombre") = 'termolaminado';
-
--- 2. Columnas nuevas de la fila (estacion_id queda NOT NULL al final, cuando todas las filas la tienen).
-ALTER TABLE "planificacion_item" ADD COLUMN "estacion_id" UUID;
+-- 3. Columnas nuevas de la fila (`plantilla` queda NOT NULL al final, cuando todas las filas la tienen).
+ALTER TABLE "planificacion_item" ADD COLUMN "plantilla" "PlantillaPlanificacion";
 ALTER TABLE "planificacion_item" ADD COLUMN "pedido_id" UUID;
+ALTER TABLE "planificacion_item" ADD COLUMN "dia" DATE;
+ALTER TABLE "planificacion_item" ADD COLUMN "modulos" INTEGER;
 
--- 3. Pedido de cada fila: coincidencia EXACTA n_tw = codigo_pedido, con pedido y orden no eliminados.
+-- Pedido de cada fila: coincidencia EXACTA n_tw = codigo_pedido, con pedido y orden no eliminados (solo las vigentes).
 UPDATE "planificacion_item" i
 SET "pedido_id" = m."pedido_id"
 FROM (
@@ -41,33 +45,31 @@ FROM (
     AND o."estado" <> 'ELIMINADO' AND o."eliminado_en" IS NULL
   ORDER BY p."codigo_pedido", p."creado_en" DESC, p."id"
 ) m
-WHERE i."n_tw" = m."codigo_pedido" AND i."n_tw" <> '';
+WHERE i."n_tw" = m."codigo_pedido" AND i."n_tw" <> '' AND i."eliminado_en" IS NULL;
 
--- Todas las filas (también las ya borradas) quedan en la estación Termolaminado.
-UPDATE "planificacion_item"
-SET "estacion_id" = (SELECT "id" FROM "estacion_trabajo" WHERE lower("nombre") = 'termolaminado' LIMIT 1);
-ALTER TABLE "planificacion_item" ALTER COLUMN "estacion_id" SET NOT NULL;
+-- Todas las filas (también las ya borradas) eran de Termolaminado: quedan en esa planificación.
+UPDATE "planificacion_item" SET "plantilla" = 'TERMOLAMINADO';
+ALTER TABLE "planificacion_item" ALTER COLUMN "plantilla" SET NOT NULL;
 
 -- Pedidos: el compromiso toma la fecha límite cuando estaba vacío.
-UPDATE "planificacion_item" SET "compromiso" = "fecha_limite" WHERE "tipo" = 'PEDIDOS' AND "compromiso" IS NULL AND "fecha_limite" IS NOT NULL;
-
--- Las vigentes sin pedido se borran (borrado lógico).
-UPDATE "planificacion_item" SET "eliminado_en" = CURRENT_TIMESTAMP WHERE "pedido_id" IS NULL AND "eliminado_en" IS NULL;
+UPDATE "planificacion_item" SET "compromiso" = "fecha_limite" WHERE "compromiso" IS NULL AND "fecha_limite" IS NOT NULL;
 
 -- 4. Claves foráneas e índices; se eliminan las columnas viejas (con ellas se va el índice (area, semana_inicio, tipo)).
-ALTER TABLE "planificacion_item" ADD CONSTRAINT "planificacion_item_estacion_id_fkey" FOREIGN KEY ("estacion_id") REFERENCES "estacion_trabajo"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
 ALTER TABLE "planificacion_item" ADD CONSTRAINT "planificacion_item_pedido_id_fkey" FOREIGN KEY ("pedido_id") REFERENCES "pedido"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
-CREATE INDEX "planificacion_item_estacion_id_semana_inicio_tipo_orden_idx" ON "planificacion_item"("estacion_id", "semana_inicio", "tipo", "orden");
+CREATE INDEX "planificacion_item_plantilla_semana_inicio_dia_orden_idx" ON "planificacion_item"("plantilla", "semana_inicio", "dia", "orden");
 CREATE INDEX "planificacion_item_pedido_id_idx" ON "planificacion_item"("pedido_id");
 
 DROP INDEX IF EXISTS "planificacion_item_area_semana_inicio_tipo_idx";
 ALTER TABLE "planificacion_item"
   DROP COLUMN "area",
-  DROP COLUMN "cliente",
-  DROP COLUMN "n_tw",
-  DROP COLUMN "n_orden",
+  DROP COLUMN "tipo",
   DROP COLUMN "fabrica",
-  DROP COLUMN "fecha_limite";
+  DROP COLUMN "fecha_limite",
+  DROP COLUMN "distribuidor",
+  DROP COLUMN "ticket",
+  DROP COLUMN "tipo_reclamo",
+  DROP COLUMN "finalizado_en";
+DROP TYPE "PlanificacionTipo";
 
 -- 5. Posición de las órdenes en la cartera. Se conserva el orden que tenían (más nuevas primero: posicion 0 = la más nueva);
 -- las órdenes que se agreguen desde ahora van al final (posicion = máxima + 1).

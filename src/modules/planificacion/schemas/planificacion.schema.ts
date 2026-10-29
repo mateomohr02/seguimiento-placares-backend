@@ -1,3 +1,4 @@
+import { PlantillaPlanificacion } from "@prisma/client";
 import { z } from "zod";
 import { AppError } from "../../../utils/AppError";
 import { parsearBody } from "../../../utils/parsearBody";
@@ -10,32 +11,47 @@ const fechaOpc = z.preprocess(
   (v) => (v === "" || v === undefined ? null : v),
   z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "debe tener el formato AAAA-MM-DD").nullable(),
 );
-const uuid = (mensaje: string) => z.string({ required_error: mensaje, invalid_type_error: mensaje }).uuid(mensaje);
+
+// Planificación (clave del catálogo): TERMOLAMINADO o CALIDAD.
+const plantilla = z.nativeEnum(PlantillaPlanificacion, { errorMap: () => ({ message: "elegí la planificación (TERMOLAMINADO o CALIDAD)" }) });
+
+const FECHA_RE = /^\d{4}-\d{2}-\d{2}$/;
+const entero = z.preprocess(
+  (v) => (v === "" || v === undefined ? null : v),
+  z.number({ invalid_type_error: "debe ser un número entero" }).int("debe ser un número entero").min(0, "no puede ser negativo").max(100000, "es demasiado grande").nullable(),
+);
 
 /**
- * Alta y edición de una fila. La fila se arma sobre un pedido ya cargado (`pedido_id`): N° TW, N° de orden y cliente se
- * derivan de él y no se aceptan en el body (las claves de más se ignoran).
+ * Alta y edición de una fila (planificación de Termolaminado o de Calidad: el servicio aplica lo que corresponde a la
+ * `plantilla` y ignora el resto). `n_tw` identifica el pedido: obligatorio y sin espacios, salvo que venga
+ * `pedido_id` (entonces `n_tw` se toma del pedido). `cliente` es texto libre. Las claves de más (p. ej. las de los reclamos que
+ * ya no existen: `tipo`, `distribuidor`, `ticket`, `tipo_reclamo`, `finalizado_en`) se ignoran.
  */
-export const ItemSchema = z.object({
-  estacion_id: uuid("elegí la estación"),
-  tipo: z.enum(["PEDIDOS", "RECLAMOS"], { errorMap: () => ({ message: "debe ser PEDIDOS o RECLAMOS" }) }),
-  semana: z.string({ required_error: "es obligatoria" }).regex(/^\d{4}-\d{2}-\d{2}$/, "debe tener el formato AAAA-MM-DD"),
-  pedido_id: uuid("elegí el pedido"),
-  modelo: texto(80),
-  color: texto(80),
-  compromiso: fechaOpc,
-  finalizado_en: fechaOpc,
-  distribuidor: texto(80),
-  ticket: texto(40),
-  tipo_reclamo: texto(200),
-  observaciones: texto(500),
-});
+export const ItemSchema = z
+  .object({
+    plantilla,
+    semana: z.string({ required_error: "es obligatoria" }).regex(FECHA_RE, "debe tener el formato AAAA-MM-DD"),
+    dia: fechaOpc,
+    n_tw: z.preprocess((v) => (typeof v === "string" ? v.trim() : ""), z.string().max(40, "admite hasta 40 caracteres")),
+    pedido_id: z.preprocess((v) => (v === "" || v === undefined ? null : v), z.string({ invalid_type_error: "no es un id válido" }).uuid("no es un id válido").nullable()),
+    cliente: z.preprocess((v) => (typeof v === "string" ? v.trim() : ""), z.string().max(200, "admite hasta 200 caracteres")),
+    modelo: texto(80),
+    color: texto(80),
+    compromiso: fechaOpc,
+    modulos: entero,
+    observaciones: texto(500),
+  })
+  .superRefine((v, ctx) => {
+    if (v.pedido_id) return; // con pedido, el N° TW sale del pedido
+    if (v.n_tw === "") ctx.addIssue({ code: "custom", path: ["n_tw"], message: "es obligatorio" });
+    else if (/\s/.test(v.n_tw)) ctx.addIssue({ code: "custom", path: ["n_tw"], message: "el N° TW no puede llevar espacios" });
+  });
 export type ItemInput = z.infer<typeof ItemSchema>;
 
 export const ReordenarSchema = z.object({
-  estacion_id: uuid("elegí la estación"),
-  semana: z.string({ required_error: "es obligatoria" }).regex(/^\d{4}-\d{2}-\d{2}$/, "debe tener el formato AAAA-MM-DD"),
-  tipo: z.enum(["PEDIDOS", "RECLAMOS"], { errorMap: () => ({ message: "debe ser PEDIDOS o RECLAMOS" }) }),
+  plantilla,
+  semana: z.string({ required_error: "es obligatoria" }).regex(FECHA_RE, "debe tener el formato AAAA-MM-DD"),
+  dia: fechaOpc,
   ids: z
     .array(z.string().uuid("no es un id válido"), { required_error: "es obligatorio", invalid_type_error: "debe ser una lista" })
     .max(2000)
@@ -56,7 +72,8 @@ export const BuscarPedidosQuery = z.object({
   q,
   limit: z.preprocess((v) => (typeof v === "string" && v !== "" ? Number(v) : 20), z.number().int("debe ser un entero").min(1).max(50).catch(20)),
 });
-export const BuscarEnEstacionQuery = z.object({ estacion: uuid("elegí la estación"), q });
+export const BuscarEnPlanificacionQuery = z.object({ plantilla, q });
+export const PedidoPorTwQuery = z.object({ n_tw: z.preprocess((v) => (typeof v === "string" ? v.trim().slice(0, 40) : ""), z.string()) });
 
 export const parsearItem = (body: unknown) => parsearBody(ItemSchema, body);
 export const parsearReordenar = (body: unknown) => parsearBody(ReordenarSchema, body);
@@ -68,4 +85,5 @@ export function parsearObservacion(body: unknown) {
 }
 export const parsearMarca = (body: unknown) => MarcaSchema.parse(body);
 export const parsearBuscarPedidos = (query: unknown) => parsearBody(BuscarPedidosQuery, query);
-export const parsearBuscarEnEstacion = (query: unknown) => parsearBody(BuscarEnEstacionQuery, query);
+export const parsearBuscarEnPlanificacion = (query: unknown) => parsearBody(BuscarEnPlanificacionQuery, query);
+export const parsearPedidoPorTw = (query: unknown) => parsearBody(PedidoPorTwQuery, query);
