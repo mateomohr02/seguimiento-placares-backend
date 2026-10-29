@@ -14,6 +14,7 @@ API que sincroniza información de piezas de placares desde **TeoWin** (el ERP d
 4. [Variables de entorno](#variables-de-entorno)
 5. [Cómo levantarlo](#cómo-levantarlo)
    - [Flujo de ramas (git)](#flujo-de-ramas-git)
+   - [Servidor de producción (SRVTEOWIN)](#servidor-de-producción-srvteowin)
 6. [Modelo de datos](#modelo-de-datos)
 7. [Reglas de negocio importantes](#reglas-de-negocio-importantes)
 8. [Documentación de la API](#documentación-de-la-api)
@@ -128,6 +129,7 @@ Copiá `.env.example` a `.env` y completá los valores. Nunca se sube `.env` al 
 |---|---|---|
 | `DATABASE_URL` | Conexión a la base propia (PostgreSQL) | `postgresql://postgres:2002@localhost:5432/Neostone?schema=public` |
 | `PORT` | Puerto donde escucha este backend | `4000` |
+| `HOST` | *(opcional)* Dirección donde escucha. En el servidor va `127.0.0.1`: solo lo llama el frontend de la misma máquina y así no queda expuesto a la red (el firewall de SRVTEOWIN está apagado). Sin valor escucha en todas las interfaces | `127.0.0.1` |
 | `TEOWIN_DB_SERVER` | Servidor de SQL Server donde vive TeoWin | `SRVTEOWIN` |
 | `TEOWIN_DB_INSTANCE` | *(opcional)* Nombre de instancia, si es una instancia con nombre (ej. `SRVTEOWIN\TEOWIN`) | `TEOWIN` |
 | `TEOWIN_DB_PORT` | Puerto TCP, solo se usa si **no** hay `TEOWIN_DB_INSTANCE` | `1433` |
@@ -196,6 +198,15 @@ Detalle en `diseño.md` §15 (vale para este repo y el otro).
 - **Ramas de trabajo** (una por cambio y por repo; los commits van en español): `fix/<tema>`, `feature/<tema>` y `docs/<tema>` salen de `dev`, se prueban contra `Neostone_test` y vuelven a `dev` con merge `--no-ff`. No se borran ramas sin pedido.
 - **Base de datos**: toda migración nueva (aditiva, con `down.sql`) se prueba primero en `Neostone_test`; en `Neostone` (producción) solo se aplica cuando el usuario lo pide expresamente, con respaldo previo (`pg_dump`) y verificación de solo lectura después. Nunca se siembran datos de prueba en producción.
 - `feature/seguimiento-termolaminado` (versión 1, ya en `main`) se conserva como historial.
+
+## Servidor de producción (SRVTEOWIN)
+
+Detalle en `diseño.md` §20 e instructivo en `infra/deploy/LEEME.txt` (los scripts viven en `infra/deploy/`, fuera de git).
+
+- La app corre en **SRVTEOWIN** bajo `C:\Neostone`, como servicios de Windows que arrancan solos al prender (`neostone-backend`, `neostone-frontend`, `neostone-caddy`, más `postgresql-x64-18`), con la cuenta `LocalService`.
+- **El deploy es a mano** (`deploy.bat`): trae `main` de GitHub, arma la versión nueva en una carpeta aparte (`npm ci`, `prisma generate`, `npm run build`), respalda la base si hay migraciones, aplica `prisma migrate deploy`, publica y verifica `/api/health`; si no responde, vuelve sola a la versión anterior. **Lo que no está en `main` (y pusheado) no llega al servidor.**
+- `npm run build` tiene que terminar con código 0: por eso `tsconfig.json` usa `"ignoreDeprecations": "5.0"` (con `"6.0"` TypeScript 5.9 daba TS5103 y salía con error aunque generara `dist/`).
+- La configuración vive en `C:\Neostone\config\backend.env`, que el servicio pasa por `DOTENV_PATH` (no hay `.env` dentro de la carpeta de la versión). Ahí van `HOST=127.0.0.1`, `TEOWIN_DB_SERVER=localhost`, `TEOWIN_DB_INSTANCE=TEOWIN` y `TEOWIN_3D_DIR=C:/TeoWin/datos/3d/E_50`.
 
 ---
 
