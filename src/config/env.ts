@@ -8,6 +8,10 @@ const optionalString = () =>
 
 const envSchema = z.object({
   PORT: z.coerce.number().default(4000),
+  // Dirección donde escucha el backend. En el servidor va 127.0.0.1: solo lo llama el frontend de la
+  // misma máquina y así no queda expuesto a la red sin pasar por Caddy (diseño.md §20). Sin valor,
+  // escucha en todas las interfaces (como hasta ahora).
+  HOST: optionalString(),
   DATABASE_URL: z.string().min(1),
   // Credenciales de TeoWin (SQL Server) — opcionales a nivel de parseo para no
   // bloquear el resto de la app (listado de órdenes propias, frontend) mientras
