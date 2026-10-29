@@ -20,7 +20,10 @@ import { estacionesTrabajoRouter } from "./modules/estaciones-trabajo/estaciones
 export const app = express();
 
 app.use(cors());
-app.use(express.json());
+// La confirmación del importador de planificación lleva hasta 2000 filas: necesita más que el límite por defecto (100 kb).
+const jsonNormal = express.json();
+const jsonImportador = express.json({ limit: "3mb" });
+app.use((req, res, next) => (req.path === "/api/planificacion/importar/confirmar" ? jsonImportador(req, res, next) : jsonNormal(req, res, next)));
 
 app.get("/api/health", (_req, res) => {
   res.json({ ok: true });

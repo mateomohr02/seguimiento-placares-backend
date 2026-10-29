@@ -4,8 +4,9 @@ import { AppError } from "../../../utils/AppError";
 import type { EstacionCrearInput, EstacionEditarInput } from "../schemas/estacion-trabajo.schema";
 
 // Estaciones de trabajo (diseño.md §17): las crea técnica; no tienen login. Cada una tiene un estado productivo
-// opcional (el que marcan sus operarios en la planificación), las planillas que completan sus operarios, su plantilla de
-// planificación (opcional; hoy solo TERMOLAMINADO: sin plantilla la estación no tiene planificación) y sus
+// opcional (el que marcan sus operarios en la planificación), las planillas que completan sus operarios, la planificación
+// que se le asigna (`plantilla_planificacion`, opcional: TERMOLAMINADO o CALIDAD; varias estaciones pueden tener la misma; sin
+// asignar la estación no ve ninguna) y sus
 // usuarios (muchos a muchos). No se borran: activa = false. Técnica no ve ni toca a los usuarios admin.
 
 export interface Actor {

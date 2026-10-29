@@ -3,7 +3,7 @@
 //   npm run termolaminado:sembrar
 // Reemplaza todas las planillas (y sus fotos y versiones) de 2026-10-05 al 2026-10-16. Si la lista de
 // estación de trabajo termolaminado1 no existe la crea; la deja con su estado
-// "Listo Termolaminado" y las tres planillas (operarios históricos Fabián y Carlos), y siembra la planificación (pedidos y reclamos) de ejemplo.
+// "Listo Termolaminado" y las tres planillas (operarios históricos Fabián y Carlos), y siembra la planificación de ejemplo (las planificaciones TERMOLAMINADO por semana y CALIDAD por día, que son independientes de las estaciones; además se le asigna una a cada estación sembrada: «termolaminado1» -> Termolaminado y «calidad1» -> Calidad).
 // En PVC cada fila es una TANDA de mesas (diseño.md §14.12): 1 a 3 pedidos del día, tamaño y cantidad de mesas.
 // Las fotos de PVC son imágenes de relleno.
 import { Prisma, type PlanillaEstacion } from "@prisma/client";
@@ -73,10 +73,14 @@ const hhmm = (min: number) => `${String(Math.floor(min / 60)).padStart(2, "0")}:
 
 const d = (iso: string) => new Date(`${iso}T00:00:00Z`);
 
-// Planificación de ejemplo de la estación (plantilla TERMOLAMINADO). Las filas se arman sobre pedidos reales de la base
-// (hay que tener órdenes cargadas): los primeros van a PEDIDOS de las semanas 21/09, 28/09 y 05/10 y los últimos a RECLAMOS
-// de la semana del 12/10. Modelo, color, compromiso y observaciones son de ejemplo.
-async function sembrarPlanificacion(listoTermoId: string, estacionId: string) {
+// Planificación de ejemplo (diseño.md §14.4 y §19.5). Las filas pertenecen a la planificación (`plantilla`), no a una estación.
+// TERMOLAMINADO: filas en las semanas 21/09, 28/09 y 05/10; CALIDAD: filas por día, de lunes a sábado, en la semana 05/10. Las
+// filas con N° TW de un pedido real de la base quedan asociadas (hay que tener órdenes cargadas); además se siembra una fila SIN
+// pedido por planificación. El cliente es texto libre.
+// Modelo, color, compromiso, módulos y observaciones son de ejemplo.
+const CLIENTES = ["Gabriel Jurado", "Nicolás Ellember", "Victoria Sobrero", "Valeria Orzuza", "Graciela Prada", "Carlos Peralta"];
+
+async function sembrarPlanificacion(listoTermoId: string) {
   const reales = await prisma.pedido.findMany({
     where: { estado: { not: "ELIMINADO" }, orden: { estado: { not: "ELIMINADO" } } },
     select: { id: true, codigo_pedido: true },
@@ -85,11 +89,16 @@ async function sembrarPlanificacion(listoTermoId: string, estacionId: string) {
   });
   const semanas = ["2026-09-21", "2026-09-28", "2026-10-05"];
   const modelos = ["LONDON", "HERENCIA", "URBAN TERM", "LONDON + PURA"];
-  const nPedidos = Math.min(12, Math.max(0, reales.length - 6));
-  const pedidos = reales.slice(0, nPedidos);
-  const reclamos = reales.slice(nPedidos, nPedidos + 6);
-  const semanasSembradas = [...semanas, "2026-10-12"].map(d);
-  await prisma.planificacionItem.deleteMany({ where: { estacion_id: estacionId, semana_inicio: { in: semanasSembradas } } });
+  const pedidos = reales.slice(0, 12);
+  const calidadPedidos = reales.slice(12, 18);
+
+  // Estación de Calidad (sin estado ni planillas) con la planificación CALIDAD asignada.
+  let calidad = await prisma.estacionTrabajo.findFirst({ where: { nombre: { equals: "calidad1", mode: "insensitive" } } });
+  if (!calidad) calidad = await prisma.estacionTrabajo.create({ data: { nombre: "calidad1" } });
+  await prisma.estacionTrabajo.update({ where: { id: calidad.id }, data: { plantilla_planificacion: "CALIDAD" } });
+
+  const semanasSembradas = [...semanas].map(d);
+  await prisma.planificacionItem.deleteMany({ where: { plantilla: { in: ["TERMOLAMINADO", "CALIDAD"] }, semana_inicio: { in: semanasSembradas } } });
 
   let items = 0;
   const ordenPorLista = new Map<string, number>();
@@ -98,15 +107,17 @@ async function sembrarPlanificacion(listoTermoId: string, estacionId: string) {
     ordenPorLista.set(clave, n + 1);
     return n;
   };
+  const cliente = (i: number) => CLIENTES[i % CLIENTES.length];
   for (const [i, p] of pedidos.entries()) {
     const semana = semanas[i % semanas.length];
     const item = await prisma.planificacionItem.create({
       data: {
-        estacion_id: estacionId,
+        plantilla: "TERMOLAMINADO",
         pedido_id: p.id,
-        tipo: "PEDIDOS",
+        n_tw: p.codigo_pedido,
+        cliente: cliente(i),
         semana_inicio: d(semana),
-        orden: siguiente(`P${semana}`),
+        orden: siguiente(`T${semana}`),
         modelo: elegir(modelos),
         color: elegir(COLORES),
         compromiso: new Date(d(semana).getTime() + 11 * 86_400_000),
@@ -117,27 +128,36 @@ async function sembrarPlanificacion(listoTermoId: string, estacionId: string) {
       await prisma.planificacionMarca.create({ data: { item_id: item.id, estado_id: listoTermoId, marcado_por: USUARIO, marcado_en: new Date(`${semana}T18:00:00Z`) } });
     }
   }
-  const tiposReclamo = ["Relaminado / 6 placas", "Carpintería y relaminado", "Modificación y relaminado / 1", "Relaminado / 23 placas"];
-  for (const [i, p] of reclamos.entries()) {
+  // Una fila de Termolaminado sin pedido asociado (N° TW que no existe en la app).
+  await prisma.planificacionItem.create({
+    data: { plantilla: "TERMOLAMINADO", n_tw: "XX-00000", cliente: "Cliente sin pedido", semana_inicio: d(semanas[2]), orden: siguiente(`T${semanas[2]}`), modelo: "LONDON", color: "MAC" },
+  });
+  items++;
+
+  // Calidad: una fila por pedido real repartidas de lunes a sábado de la semana 05/10, con módulos de ejemplo.
+  const lunes = d("2026-10-05");
+  for (const [i, p] of calidadPedidos.entries()) {
+    const dia = new Date(lunes.getTime() + (i % 6) * 86_400_000);
     await prisma.planificacionItem.create({
       data: {
-        estacion_id: estacionId,
+        plantilla: "CALIDAD",
         pedido_id: p.id,
-        tipo: "RECLAMOS",
-        semana_inicio: d("2026-10-12"),
-        orden: siguiente("R2026-10-12"),
-        distribuidor: i % 2 === 0 ? "LOCAL" : "ALCOBER",
-        ticket: `HT0${1300 + i}`,
-        tipo_reclamo: tiposReclamo[i % tiposReclamo.length],
-        color: elegir(COLORES),
-        compromiso: d("2026-10-16"),
-        finalizado_en: i === 1 ? d("2026-10-01") : null,
-        observaciones: i === 0 ? "Falta carpeta roja" : null,
+        n_tw: p.codigo_pedido,
+        cliente: cliente(i + 2),
+        semana_inicio: lunes,
+        dia,
+        orden: siguiente(`C${dia.toISOString().slice(0, 10)}`),
+        modelo: elegir(modelos),
+        modulos: entre(4, 24),
       },
     });
     items++;
   }
-  console.log(`Planificación sembrada: ${items} filas sobre pedidos reales (${pedidos.length} de pedidos y ${reclamos.length} de reclamos).`);
+  await prisma.planificacionItem.create({
+    data: { plantilla: "CALIDAD", n_tw: "XX-00001", cliente: "Cliente sin pedido", semana_inicio: lunes, dia: lunes, orden: siguiente(`C${lunes.toISOString().slice(0, 10)}`), modelo: "HERENCIA", modulos: 8 },
+  });
+  items++;
+  console.log(`Planificación sembrada: ${items} filas (Termolaminado: ${pedidos.length} sobre pedidos reales y 1 sin pedido; Calidad: ${calidadPedidos.length} sobre pedidos reales y 1 sin pedido).`);
 }
 
 async function main() {
@@ -157,7 +177,7 @@ async function main() {
   if (!estacionTrabajo) {
     estacionTrabajo = await prisma.estacionTrabajo.create({ data: { nombre: ESTACION_TRABAJO, estado_id: listoTermo.id } });
   }
-  // La estación sembrada tiene planificación (plantilla TERMOLAMINADO).
+  // A la estación sembrada se le asigna la planificación TERMOLAMINADO (varias estaciones pueden tener la misma).
   await prisma.estacionTrabajo.update({ where: { id: estacionTrabajo.id }, data: { plantilla_planificacion: "TERMOLAMINADO" } });
   for (const planilla of ["LIJADO", "ENCOLADO", "PVC"] as PlanillaEstacion[]) {
     await prisma.estacionTrabajoPlanilla.upsert({
@@ -324,7 +344,7 @@ async function main() {
     console.log("Planilla corregida de ejemplo:", corregida.estacion, corregida.fecha.toISOString().slice(0, 10));
   }
 
-  await sembrarPlanificacion(listoTermo.id, estacionTrabajo.id);
+  await sembrarPlanificacion(listoTermo.id);
 
   console.log(`Sembrado: ${planillas} planillas, ${registros} registros, ${fotos} fotos (${DESDE} a ${HASTA}). Estación de trabajo: ${ESTACION_TRABAJO}.`);
 }
