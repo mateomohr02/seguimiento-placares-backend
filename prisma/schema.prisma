@@ -67,10 +67,12 @@ model Orden {
   creado_en              DateTime    @default(now())
   eliminado_en           DateTime?
   archivada_en           DateTime? // archivar solo oculta la orden del listado inicial; no cambia su estado ni libera el codigoOrdenFabricacion
+  posicion               Int         @default(0) // lugar en la cartera (listado inicial, global): lo reordena técnica a mano; las nuevas van al final
 
   pedidos    Pedido[]
   hojasCorte HojaCorte[]
 
+  @@index([posicion])
   @@map("orden")
 }
 
@@ -89,6 +91,8 @@ model Pedido {
   documentos DocumentoPedido[]
   planos     PlanoPedido[]
   escenas    EscenaPedido[]
+
+  planificacionItems PlanificacionItem[]
 
   @@map("pedido")
 }
@@ -437,9 +441,13 @@ enum PlanillaEstado {
   GUARDADA
 }
 
-enum PlanificacionTipo {
-  PEDIDOS
-  RECLAMOS
+// Catálogo de planificaciones (independientes de las estaciones): TERMOLAMINADO (una tabla de pedidos por semana, lunes a viernes)
+// y CALIDAD (una tabla por día, de lunes a sábado). Cada fila de planificacion_item pertenece a una; a una estación se le ASIGNA
+// una (estacion_trabajo.plantilla_planificacion, opcional; varias estaciones pueden tener la misma). Agregar una planificación
+// nueva = agregar un valor acá y su formato en el módulo planificacion (ver README).
+enum PlantillaPlanificacion {
+  TERMOLAMINADO
+  CALIDAD
 }
 
 // Una planilla por estación y día (`fecha` es el día de la carga). Se completa durante
@@ -620,11 +628,13 @@ model EstadoProduccion {
 // operarios. No se borra: activa = false. Nombre único sin distinguir mayúsculas: índice de expresión
 // `estacion_trabajo_nombre_ci_key` (lower(nombre)), creado a mano en la migración.
 model EstacionTrabajo {
-  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  nombre    String
-  activa    Boolean  @default(true)
-  creado_en DateTime @default(now())
-  estado_id String?  @db.Uuid
+  id                      String                  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  nombre                  String
+  activa                  Boolean                 @default(true)
+  creado_en               DateTime                @default(now())
+  estado_id               String?                 @db.Uuid
+  // Planificación asignada a la estación (null = no ve ninguna). Varias estaciones pueden tener la misma.
+  plantilla_planificacion PlantillaPlanificacion?
 
   estado              EstadoProduccion?         @relation(fields: [estado_id], references: [id], onDelete: Restrict)
   planillas           EstacionTrabajoPlanilla[]
@@ -669,36 +679,36 @@ model UsuarioEstadoProduccion {
   @@map("usuario_estado_produccion")
 }
 
-// Planificación semanal que carga técnica a mano: una fila por pedido (o por reclamo). Los pedidos usan
-// cliente / n_tw / n_orden / modelo / color / fabrica / fecha_limite; los reclamos, cliente / distribuidor /
-// ticket / n_tw / tipo_reclamo / color / compromiso / finalizado_en / observaciones. `semana_inicio` es el
-// lunes. Borrado lógico.
+// Fila de una planificación semanal (`plantilla` = a cuál pertenece; NO depende de las estaciones: TERMOLAMINADO una lista por
+// semana; CALIDAD una lista por día, de lunes a sábado). `cliente` es texto libre. `n_tw` es el N° de pedido (texto, sin espacios): si coincide
+// exacto con un pedido vigente la fila queda asociada (`pedido_id`) y el N° de orden sale de su orden; si no, la fila queda SIN
+// pedido y `n_orden` (texto) guarda el N° de orden que se haya cargado a mano (en las asociadas no se usa). `semana_inicio` es el
+// lunes; `dia` (solo CALIDAD) es un día de lunes a sábado de esa semana; `modulos` solo CALIDAD. `orden` es el lugar dentro de
+// (planificación, semana) en Termolaminado y de (planificación, semana, día) en Calidad. Borrado lógico.
 model PlanificacionItem {
-  id            String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  area          String            @default("TERMOLAMINADO")
-  tipo          PlanificacionTipo
-  semana_inicio DateTime          @db.Date
-  orden         Int               @default(0)
-  cliente       String            @default("")
-  n_tw          String            @default("")
+  id            String                 @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  plantilla     PlantillaPlanificacion
+  pedido_id     String?                @db.Uuid
+  semana_inicio DateTime               @db.Date
+  dia           DateTime?              @db.Date
+  orden         Int                    @default(0)
+  cliente       String                 @default("")
+  n_tw          String                 @default("")
   n_orden       String?
   modelo        String?
   color         String?
-  fabrica       DateTime?         @db.Date
-  fecha_limite  DateTime?         @db.Date
-  distribuidor  String?
-  ticket        String?
-  tipo_reclamo  String?
-  compromiso    DateTime?         @db.Date
-  finalizado_en DateTime?         @db.Date
+  modulos       Int?
+  compromiso    DateTime?              @db.Date
   observaciones String?
-  creado_en     DateTime          @default(now())
+  creado_en     DateTime               @default(now())
   eliminado_en  DateTime?
 
+  pedido      Pedido?                    @relation(fields: [pedido_id], references: [id], onDelete: Restrict)
   marcas      PlanificacionMarca[]
   comentarios PlanificacionObservacion[]
 
-  @@index([area, semana_inicio, tipo])
+  @@index([plantilla, semana_inicio, dia, orden])
+  @@index([pedido_id])
   @@map("planificacion_item")
 }
 

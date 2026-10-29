@@ -4,7 +4,9 @@ import { AppError } from "../../../utils/AppError";
 import type { EstacionCrearInput, EstacionEditarInput } from "../schemas/estacion-trabajo.schema";
 
 // Estaciones de trabajo (diseño.md §17): las crea técnica; no tienen login. Cada una tiene un estado productivo
-// opcional (el que marcan sus operarios en la planificación), las planillas que completan sus operarios y sus
+// opcional (el que marcan sus operarios en la planificación), las planillas que completan sus operarios, la planificación
+// que se le asigna (`plantilla_planificacion`, opcional: TERMOLAMINADO o CALIDAD; varias estaciones pueden tener la misma; sin
+// asignar la estación no ve ninguna) y sus
 // usuarios (muchos a muchos). No se borran: activa = false. Técnica no ve ni toca a los usuarios admin.
 
 export interface Actor {
@@ -20,6 +22,7 @@ const estacionSelect = {
   nombre: true,
   activa: true,
   estado_id: true,
+  plantilla_planificacion: true,
   planillas: { select: { planilla: true } },
   usuarios: { select: { usuario: { select: { id: true, nombre: true, apellido: true, activo: true, rol: { select: { nombre: true } } } } } },
 } satisfies Prisma.EstacionTrabajoSelect;
@@ -34,6 +37,7 @@ function estacionDTO(e: EstacionDB, actor: Actor) {
     activa: e.activa,
     planillas: ORDEN_PLANILLAS.filter((p) => planillas.includes(p)),
     estado_id: e.estado_id,
+    plantilla_planificacion: e.plantilla_planificacion,
     usuarios: e.usuarios
       .map(({ usuario: u }) => ({ id: u.id, nombre: u.nombre, apellido: u.apellido, rol: u.rol.nombre, activo: u.activo }))
       .filter((u) => esAdmin(actor) || u.rol !== "admin")
@@ -75,6 +79,7 @@ export async function crearEstacion(input: EstacionCrearInput, actor: Actor) {
       data: {
         nombre: input.nombre,
         estado_id: input.estado_id,
+        plantilla_planificacion: input.plantilla_planificacion,
         planillas: { create: [...new Set(input.planillas)].map((planilla) => ({ planilla })) },
       },
       select: { id: true },
@@ -110,7 +115,7 @@ export async function actualizarEstacion(id: string, input: EstacionEditarInput,
 
   try {
     await prisma.$transaction([
-      prisma.estacionTrabajo.update({ where: { id }, data: { nombre: input.nombre, estado_id: input.estado_id, activa: input.activa } }),
+      prisma.estacionTrabajo.update({ where: { id }, data: { nombre: input.nombre, estado_id: input.estado_id, plantilla_planificacion: input.plantilla_planificacion, activa: input.activa } }),
       ...(planillas === undefined
         ? []
         : [

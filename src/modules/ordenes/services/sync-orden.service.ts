@@ -41,8 +41,11 @@ export async function syncOrdenFromTeowin(codigoOrdenFabricacion: number) {
   const partidas = await cargarPartidasDeOrden(codigoOrdenFabricacion);
 
   return prisma.$transaction(async (tx) => {
+    // La orden nueva entra al final de la cartera (posicion = la mayor + 1, contando también eliminadas y archivadas).
+    const ultima = await tx.orden.aggregate({ _max: { posicion: true } });
     const orden = await tx.orden.create({
       data: {
+        posicion: (ultima._max.posicion ?? -1) + 1,
         codigoOrdenFabricacion: cabecera.numeroOrden,
         numeroOrdenCustom: cabecera.numeroOrdenCustom,
         descripcion: cabecera.descripcion,

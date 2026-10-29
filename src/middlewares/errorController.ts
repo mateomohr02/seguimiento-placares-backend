@@ -32,6 +32,11 @@ export function errorController(
     return;
   }
 
+  if (typeof err === "object" && err !== null && (err as { type?: string }).type === "entity.too.large") {
+    res.status(413).json({ status: "fail", message: "El pedido es demasiado grande.", data: null });
+    return;
+  }
+
   console.error(err);
   res.status(500).json({ status: "error", message: "Error interno del servidor.", data: null });
 }
